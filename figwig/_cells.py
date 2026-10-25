@@ -17,6 +17,11 @@ chromosome at a time, and the runs of equal keys are the counts. The
 position must lie inside its chromosome, which bounds it to 32 bits; an
 end outside is counted as dropped, as `figwig bam2fw` reports it.
 
+The key's position part is the tile's number above the cell and the
+offset within the tile below it, so that the sorted entries lie in the
+order the writer's encoders take, tile by tile and track by track within
+one, and the writer is told not to sort them again.
+
 Barcodes are either listed up front (`--cells`), in which case every
 thread shares one table and an unlisted barcode is skipped, or discovered
 as they appear, in which case each unit of the file is scanned against a
@@ -52,12 +57,14 @@ _BGZF_EOF = (b'\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00'
 
 def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 	name_data, name_offsets, name_slots, cell_hash, cell_name, cell_data,
-	cell_offsets, cell_slots, field, cell_bits, sizes, dropped, skipped, mode,
-	pos_shift, neg_shift):
+	cell_offsets, cell_slots, field, cell_bits, tile_bits, sizes, dropped,
+	skipped, mode, pos_shift, neg_shift):
 	"""Scan the lines of buf[i:n], which ends at a newline or at the end of
 	the file, appending one key per recorded end of each fragment whose
 	barcode, in column `field` (from 0), has a cell number in the barcode
-	table. Compiled with numba by _cell_scanner.
+	table. Compiled with numba by _cell_scanner. A key is the chromosome,
+	the tile, the cell and the offset in the tile, from the high bits down,
+	the tile and the offset together taking the position's 32 bits.
 
 	Returns (status, i, n_lines, n_keys, a, b). Status 0: every line was
 	scanned. Status 1: the chromosome name buf[a:b] is not in the name
@@ -306,20 +313,24 @@ def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 		start += pos_shift
 		end += neg_shift
 		size = sizes[slot]
-		high = ((slot << cell_bits) | cell) << _POSITION_BITS
+		high = slot << (cell_bits + _POSITION_BITS)
+		low = cell << tile_bits
+		offset_mask = (1 << tile_bits) - 1
 
 		if mode != 1:
 			if start < 0 or start >= size:
 				dropped[slot] += 1
 			else:
-				keys[n_keys] = high | start
+				keys[n_keys] = high | ((start >> tile_bits) << (cell_bits +
+					tile_bits)) | low | (start & offset_mask)
 				n_keys += 1
 
 		if mode != 0:
 			if end - 1 < 0 or end - 1 >= size:
 				dropped[slot] += 1
 			else:
-				keys[n_keys] = high | (end - 1)
+				keys[n_keys] = high | (((end - 1) >> tile_bits) << (cell_bits +
+					tile_bits)) | low | ((end - 1) & offset_mask)
 				n_keys += 1
 
 		i = next_i
@@ -377,8 +388,8 @@ class _CellScan:
 	"""The state one scan of a fragments file shares between its units: the
 	chromosome table, the barcode table, the sizes, and the counters."""
 
-	def __init__(self, chroms, sizes, barcodes, field, cell_bits, mode, args,
-			filename):
+	def __init__(self, chroms, sizes, barcodes, field, cell_bits, tile_bits,
+			mode, args, filename):
 		self.table = _NameTable(len(chroms))
 		for slot, chrom in enumerate(chroms):
 			data = chrom.encode('utf-8')
@@ -393,6 +404,7 @@ class _CellScan:
 		self.sizes = numpy.asarray(sizes, dtype=numpy.int64)
 		self.field = field
 		self.cell_bits = cell_bits
+		self.tile_bits = tile_bits
 		self.mode = mode
 		self.args = args
 		self.filename = filename
@@ -417,8 +429,9 @@ class _CellScan:
 				keys, n_keys, table.table_hash, table.table_name, table.name_data,
 				table.name_offsets, table.name_slots, cells.table_hash,
 				cells.table_name, cells.name_data, cells.name_offsets,
-				cells.name_slots, self.field, self.cell_bits, self.sizes, dropped,
-				skipped, self.mode, args.pos_shift, args.neg_shift)
+				cells.name_slots, self.field, self.cell_bits, self.tile_bits,
+				self.sizes, dropped, skipped, self.mode, args.pos_shift,
+				args.neg_shift)
 
 			if status == 0:
 				return keys, n_keys, n_lines
@@ -449,7 +462,7 @@ class _CellScan:
 					self.filename, line[:120], self.field + 1))
 
 
-def _renumber(keys, first_new, new_cells, base, cell_bits):
+def _renumber(keys, first_new, new_cells, base, cell_bits, tile_bits):
 	"""Give the keys of a unit scanned against a copy of `base` the cell
 	numbers `base` assigns, adding the unit's new barcodes to it in order."""
 
@@ -463,8 +476,8 @@ def _renumber(keys, first_new, new_cells, base, cell_bits):
 			count = base.add(data, base.n_kept)
 		remap[first_new + j] = base.name_slots[count]
 
-	cell = (keys >> _POSITION_BITS) & ((1 << cell_bits) - 1)
-	keys += (remap[cell] - cell) << _POSITION_BITS
+	cell = (keys >> tile_bits) & ((1 << cell_bits) - 1)
+	keys += (remap[cell] - cell) << tile_bits
 	return keys
 
 
@@ -534,7 +547,7 @@ def _scan_file_units(state, compressed, bar, threads):
 			carry = bytearray(tail)
 			if state.keep_all:
 				keys = _renumber(keys, found[0], found[1], state.cells,
-					state.cell_bits)
+					state.cell_bits, state.tile_bits)
 			parts.append(keys)
 			state.missing.extend(names)
 			state.dropped += counters[0]
@@ -631,7 +644,8 @@ def _check_bgzf_end(filename):
 			"so it was cut short.").format(filename))
 
 
-def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
+def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0,
+		tile=16384):
 	"""Count each barcode's fragment ends in a fragments file.
 
 	Parameters
@@ -660,12 +674,17 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 	idx: int
 		The input's index, for the progress bar's row.
 
+	tile: int
+		The figwig file's tile, a power of two, which orders the entries.
+
 	Returns
 	-------
 	counts: dict
-		Chromosome name -> (positions, cells, counts), the sorted distinct
+		Chromosome name -> (positions, cells, counts), the distinct
 		(position, cell) pairs with fragment ends and how many each has, as
-		uint32, int32 and uint32 arrays.
+		uint32, int32 and uint32 arrays, sorted by tile, then cell, then
+		position: the order `FigWigWriter.write_sparse` encodes in when the
+		cells are one group.
 
 	barcodes: list of str
 		The barcodes kept, cell number i being barcodes[i].
@@ -699,8 +718,9 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 			1 << cell_bits, len(chroms)))
 
 	mode = 2 if args.fragments else (1 if args.three_prime else 0)
-	state = _CellScan(chroms, sizes, barcodes, field, cell_bits, mode, args,
-		filename)
+	tile_bits = int(tile).bit_length() - 1
+	state = _CellScan(chroms, sizes, barcodes, field, cell_bits, tile_bits, mode,
+		args, filename)
 	compressed = not filename.endswith(('.tsv', '.bed'))
 
 	from isal.isal_zlib import IsalError
@@ -748,9 +768,12 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 		edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << (
 			_POSITION_BITS + cell_bits)
 		bounds = numpy.searchsorted(distinct, edges)
-		positions = (distinct & _POSITION_MASK).astype(numpy.uint32)
-		cells = ((distinct >> _POSITION_BITS) & ((1 << cell_bits) - 1)).astype(
+		cells = ((distinct >> tile_bits) & ((1 << cell_bits) - 1)).astype(
 			numpy.int32)
+		positions = ((distinct >> (tile_bits + cell_bits)) & (_POSITION_MASK >>
+			tile_bits)).astype(numpy.uint32)
+		positions <<= tile_bits
+		positions |= (distinct & ((1 << tile_bits) - 1)).astype(numpy.uint32)
 		del distinct
 
 		for slot in numpy.flatnonzero(bounds[1:] > bounds[:-1]):

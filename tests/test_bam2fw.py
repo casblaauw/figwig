@@ -625,3 +625,47 @@ def test_default_groups_stay_within_a_chunk(tmp_path, sizes, monkeypatch):
 		"-t", "16", "--groups", "3")
 	assert [track["group"] for track in FigWigReader(out).tracks] == [0, 0, 0,
 		1, 1, 1, 2, 2, 2, 3]
+
+
+def test_entries_arrive_in_the_writers_order(tmp_path, sizes):
+	"""The scanner's keys sort into the order the writer encodes in, tile by
+	tile and cell by cell, so bam2fw hands them over presorted; the file must
+	be the one the same entries make through the sorting path, given in any
+	order, and a duplicate must still be named by the position given."""
+
+	from figwig import FigWigWriter
+
+	rng = numpy.random.default_rng(2)
+	rows = [("chr1", int(k), int(k) + 7, "B{}".format(rng.integers(30))) for k
+		in sorted(rng.integers(0, 990, 5000))]
+	rows += [("chr2", int(k), int(k) + 7, "B{}".format(rng.integers(30))) for k
+		in sorted(rng.integers(0, 490, 2000))]
+	path = str(write_intervals(tmp_path / "many.tsv", rows))
+	out = bam2fw(tmp_path, [path], sizes, "--barcode-column", "4", "-f", "-t",
+		"256")
+	reader = FigWigReader(out)
+	names = [track["name"] for track in reader.tracks]
+
+	entries = {}
+	for chrom, start, end, barcode in rows:
+		for position in (start, end - 1):
+			entries[(chrom, position, barcode)] = entries.get((chrom, position,
+				barcode), 0) + 1
+	keys = list(entries)
+	rng.shuffle(keys)
+	other = str(tmp_path / "shuffled.fw")
+	with FigWigWriter(other, CHROM_SIZES, names, tile=256, level=1,
+			groups=len(names)) as writer:
+		for chrom in ("chr1", "chr2"):
+			these = [key for key in keys if key[0] == chrom]
+			writer.write_sparse(chrom, [key[1] for key in these], [key[2] for
+				key in these], [entries[key] for key in these])
+	with open(out, "rb") as a, open(other, "rb") as b:
+		assert a.read() == b.read()
+
+	with FigWigWriter(str(tmp_path / "dup.fw"), CHROM_SIZES, ["a", "b"],
+			groups=2) as writer:
+		writer._sorted_entries = True
+		with pytest.raises(ValueError, match="entries 1 and 2 both name base 5"):
+			writer.write_sparse("chr1", [3, 5, 5], [0, 1, 1], [1, 1, 1])
+		writer.write_sparse("chr1", [3, 5], [0, 1], [1, 1])

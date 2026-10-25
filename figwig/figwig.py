@@ -823,6 +823,7 @@ class FigWigWriter:
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
 		self._copies = True
+		self._sorted_entries = False
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
 		self.zooms = _check_zooms(0 if zooms is None else zooms)
 		self._zoom_grids = [_zoom_grid(self._lengths, self.tile, 4 ** (k + 1))
@@ -1497,19 +1498,29 @@ class FigWigWriter:
 		# per entry where the chromosome and group are the same throughout,
 		# as in a call per chromosome, and of two otherwise; a lexsort of the
 		# five would take several times longer.
+		# A caller whose entries already lie in that order, as `figwig
+		# bam2fw --barcode-column` makes them, says so with `_sorted_entries`
+		# and is spared the sort and the four gathers.
 		group_ids = self._group_of[track_ids]
-		order = self._entry_order(tids, group_ids, track_ids, positions)
-		tids, positions, track_ids, group_ids = tids[order], positions[order], \
-			track_ids[order], group_ids[order]
-		values = values[order].astype(numpy.float64)
+		if self._sorted_entries:
+			order = None
+			values = values.astype(numpy.float64)
+		else:
+			order = self._entry_order(tids, group_ids, track_ids, positions)
+			tids, positions, track_ids, group_ids = tids[order], positions[order], \
+				track_ids[order], group_ids[order]
+			values = values[order].astype(numpy.float64)
+
+		def given(k):
+			return k if order is None else int(order[k])
+
 		same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
 			positions[1:] == positions[:-1])
 		if same.any():
 			k = int(numpy.argmax(same)) + 1
 			raise ValueError("entries {} and {} both name base {} of {!r} in "
-				"track {!r}.".format(int(order[k - 1]), int(order[k]),
-				positions[k], names[codes[int(order[k])]], self.tracks[int(
-				track_ids[k])]['name']))
+				"track {!r}.".format(given(k - 1), given(k), positions[k],
+				names[codes[given(k)]], self.tracks[int(track_ids[k])]['name']))
 
 		def describe(j):
 			return "entry {} on {!r}".format(j, names[codes[j]])
@@ -1523,7 +1534,7 @@ class FigWigWriter:
 			high = int(positions[a:b].max())
 			self._check_order_of(int(group_ids[a]), tids[a:a + 1], numpy.array([
 				low]), numpy.array([high + 1]), numpy.array([0, 1]), lambda j, c=a:
-				describe(int(order[c])), None, entries=self.order == 'positions')
+				describe(given(c)), None, entries=self.order == 'positions')
 
 		self._written = True
 		for a, b in zip(bounds[:-1], bounds[1:]):

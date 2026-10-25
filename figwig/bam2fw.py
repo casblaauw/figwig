@@ -295,7 +295,7 @@ def _cells_main(args, prog, cores, chrom_sizes):
 	for idx, filename in enumerate(args.filename):
 		try:
 			counts, barcodes, missing, file_dropped, skipped = _read_cells(filename,
-				args, chrom_sizes, field, listed, cores, idx)
+				args, chrom_sizes, field, listed, cores, idx, args.tile)
 			if len(barcodes) == 0 and len(missing) > 0:
 				raise ValueError(("no fragment of {} is on a chromosome of {}; the "
 					"file's chromosomes include {}.").format(filename, args.sizes,
@@ -336,6 +336,10 @@ def _cells_main(args, prog, cores, chrom_sizes):
 			writer._copies = False
 			offset = 0
 			for counts, barcodes in zip(files, barcodes_per_file):
+				# The entries come sorted by tile, cell and offset, which is
+				# the writer's own order when the file's cells are one group.
+				writer._sorted_entries = len(barcodes) <= (max(_CHUNK_VALUES //
+					args.tile, 1) if args.groups is None else args.groups)
 				read_depth = None
 				if args.read_depth:
 					read_depth = sum(int(values.sum()) for _, _, values in
