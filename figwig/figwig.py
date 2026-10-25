@@ -52,6 +52,8 @@ from typing import NamedTuple
 import numpy
 
 from ._figwig_kernels import _BLOCK_ENTRIES
+from ._figwig_kernels import _entry_bounds
+from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
 from ._figwig_kernels import _CODE_SHIFT
@@ -1429,7 +1431,8 @@ class FigWigWriter:
 			self._sorted_entries)
 		n = len(positions)
 		values = numpy.asarray(values)
-		_check_exact(values)
+		if not self._sorted_entries:
+			_check_exact(values)
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 		if values.shape != (n,):
@@ -1470,10 +1473,13 @@ class FigWigWriter:
 			codes = numpy.broadcast_to(codes, n)
 			tids = numpy.broadcast_to(tids, n)
 		present = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
-		present[track_ids] = True
+		if self._sorted_entries:
+			low, high = _entry_bounds(positions, track_ids, present)
+			low, high = int(low), int(high)
+		else:
+			present[track_ids] = True
+			low, high = int(positions.min()), int(positions.max())
 		ids = numpy.flatnonzero(present)
-
-		low, high = int(positions.min()), int(positions.max())
 		if single:
 			outside = low < 0 or high >= self._lengths[tids[0]]
 		else:
@@ -1515,9 +1521,10 @@ class FigWigWriter:
 		# as in a call per chromosome, and of two otherwise; a lexsort of the
 		# five would take several times longer.
 		# A caller whose entries already lie in that order, with no two on
-		# one base of one track, as `figwig bam2fw --barcode-column` makes
-		# them, says so with `_sorted_entries` and is spared the sort, the
-		# gathers, the copies and the check for a repeated base; on one
+		# one base of one track and every value finite, as `figwig bam2fw
+		# --barcode-column` makes them, says so with `_sorted_entries` and is
+		# spared the sort, the gathers, the copies, the check for a repeated
+		# base and the pass over the values for infinity; on one
 		# chromosome and one group, the usual call, it is spared every pass
 		# over the entries but the checks of their range.
 		groups_present = numpy.unique(self._group_of[ids])
@@ -2181,16 +2188,16 @@ class FigWigWriter:
 				result = result.result()
 			if len(result) == 8:
 				stats, summary = result[6], result[7]
-				rows = self._groups[g]
-				_fold_sums(self._stats, rows, stats[:, 0] + stats[:, 5])
-				self._stats[rows, 1] += stats[:, 1]
-				self._stats[rows, 2] = numpy.minimum(self._stats[rows, 2],
-					stats[:, 2])
-				self._stats[rows, 3] = numpy.maximum(self._stats[rows, 3],
-					stats[:, 3])
-				self._stats[rows, 4] = (self._stats[rows, 4].astype(numpy.int64) |
-					stats[:, 4].astype(numpy.int64)).astype(numpy.float64)
-				self._check_overflow(rows)
+				# One pass over the group's rows, where five fancy-indexed
+				# operations over thousands of tracks per batch were most of
+				# what this thread did per batch.
+				flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+					dtype=numpy.int64), numpy.ascontiguousarray(stats,
+					dtype=numpy.float64))
+				if flagged >= 0:
+					raise ValueError("a value of track {!r} lies beyond float32's "
+						"range; declare the track float64 to keep it.".format(
+						self.tracks[int(flagged)]['name']))
 				if summary is not None:
 					self._sums[g].append(summary)
 

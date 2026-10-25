@@ -672,3 +672,16 @@ def test_entries_arrive_in_the_writers_order(tmp_path, sizes):
 				"outside the chromosome"):
 			writer.write_sparse("chr1", [3, 5, 2000], [0, 1, 1], [1, 1, 1])
 		writer.write_sparse("chr1", [3, 5], [0, 1], [1, 1])
+
+
+def test_infinite_scale_factor_is_refused(tmp_path, fragments, sizes):
+	"""The presorted hand-off promises finite values, so it is not used
+	when the scale factor is not finite, and the writer refuses as it would
+	any infinite value."""
+
+	with pytest.raises(SystemExit, match="values must be finite or NaN"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f", "-sf",
+			"inf")
+	path = bam2fw(tmp_path / "zero", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-sf", "0")
+	assert FigWigReader(path).stats["sum"].tolist() == [0, 0, 0]

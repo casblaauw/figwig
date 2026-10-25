@@ -337,9 +337,11 @@ def _cells_main(args, prog, cores, chrom_sizes):
 			offset = 0
 			for counts, barcodes in zip(files, barcodes_per_file):
 				# The entries come sorted by tile, cell and offset, which is
-				# the writer's own order when the file's cells are one group.
+				# the writer's own order when the file's cells are one group,
+				# and finite unless the scale factor is not.
 				writer._sorted_entries = len(barcodes) <= (max(_CHUNK_VALUES //
-					args.tile, 1) if args.groups is None else args.groups)
+					args.tile, 1) if args.groups is None else args.groups) and \
+					bool(numpy.isfinite(args.scale_factor))
 				read_depth = None
 				if args.read_depth:
 					read_depth = sum(int(values.sum()) for _, _, values in

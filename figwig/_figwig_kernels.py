@@ -555,6 +555,53 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 
 @numba.njit(nogil=True, cache=True)
+def _fold_batch(stats, rows, batch):
+	"""Fold a batch's (tracks, 6) statistics into the writer's for the
+	tracks `rows`: the compensated sum, the nonzero bases, the minimum,
+	the maximum and the flags, in one pass. Returns the first track whose
+	flags hold an overflow, or -1."""
+
+	flagged = -1
+	for k in range(rows.shape[0]):
+		g = rows[k]
+		v = batch[k, 0] + batch[k, 5]
+		total = stats[g, 0]
+		t = total + v
+		if abs(total) >= abs(v):
+			stats[g, 5] += (total - t) + v
+		else:
+			stats[g, 5] += (v - t) + total
+		stats[g, 0] = t
+		stats[g, 1] += batch[k, 1]
+		if batch[k, 2] < stats[g, 2]:
+			stats[g, 2] = batch[k, 2]
+		if batch[k, 3] > stats[g, 3]:
+			stats[g, 3] = batch[k, 3]
+		f = numpy.int64(stats[g, 4]) | numpy.int64(batch[k, 4])
+		stats[g, 4] = numpy.float64(f)
+		if flagged < 0 and f & _FLAG_OVERFLOW:
+			flagged = g
+	return flagged
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_bounds(positions, tracks, present):
+	"""The lowest and highest of `positions`, marking each track of
+	`tracks` in `present`, in one pass."""
+
+	low = positions[0]
+	high = positions[0]
+	for e in range(positions.shape[0]):
+		p = positions[e]
+		if p < low:
+			low = p
+		if p > high:
+			high = p
+		present[tracks[e]] = True
+	return low, high
+
+
+@numba.njit(nogil=True, cache=True)
 def _tile_cuts(positions, tile, per_batch):
 	"""Where to cut entries sorted by tile into batches of whole tiles
 	holding at least `per_batch` entries each, but for the last: the start

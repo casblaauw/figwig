@@ -45,7 +45,7 @@ from .bam2bw import _IV_BGZF_HEADER
 from .bam2bw import _NameTable
 from .bam2bw import _NotBlockGzip
 from .bam2bw import _bgzf_units
-from .bam2bw import _inflate_unit
+from .bam2bw import _inflate_engine
 from .bam2bw import _jit
 from .bam2bw import _text_units
 from .bam2bw import _tqdm
@@ -484,6 +484,31 @@ def _renumber(keys, first_new, new_cells, base, cell_bits, tile_bits):
 	return keys
 
 
+def _inflate_blocks(inflate, data, spans):
+	"""The text of a run of BGZF blocks, inflated by bam2bw's kernel in one
+	call without the GIL, each block checked to be one gzip member of the
+	length and CRC-32 its trailer gives; a block that is not raises
+	_NotBlockGzip. Inflating the 128 blocks of a unit one by one through
+	Python objects held the GIL for a few microseconds per block, which
+	with 177,000 blocks in a file was the scan's floor past four threads."""
+
+	offsets = numpy.array([at for at, _ in spans], dtype=numpy.int64)
+	sizes = numpy.array([size for _, size in spans], dtype=numpy.int64)
+	ends = offsets + sizes
+	view = numpy.frombuffer(data, dtype=numpy.uint8)
+	lengths = (view[ends - 4].astype(numpy.int64) | (view[ends - 3].astype(
+		numpy.int64) << 8) | (view[ends - 2].astype(numpy.int64) << 16) | (
+		view[ends - 1].astype(numpy.int64) << 24))
+	if (lengths > 65536).any():
+		raise _NotBlockGzip()
+	text = bytearray(int(lengths.sum()))
+	end = inflate(view, offsets, sizes, lengths, numpy.frombuffer(text,
+		dtype=numpy.uint8), 0)
+	if end != len(text):
+		raise _NotBlockGzip()
+	return text
+
+
 def _scan_file_units(state, compressed, bar, threads):
 	"""Scan a BGZF or uncompressed file in units on `threads` threads, as
 	bam2bw's _scan_units does, returning the keys. Raises _NotBlockGzip
@@ -494,9 +519,10 @@ def _scan_file_units(state, compressed, bar, threads):
 	import threading
 
 	local = threading.local()
+	inflate = _inflate_engine() if compressed else None
 
 	def work(unit, first, cells):
-		text = _inflate_unit(*unit) if compressed else unit
+		text = _inflate_blocks(inflate, *unit) if compressed else unit
 
 		start = 0
 		if not first:
@@ -654,16 +680,21 @@ def _finish_slot(keys, cell_bits, tile_bits):
 	return positions, cells, counts
 
 
+def _join_and_finish(pieces, cell_bits, tile_bits):
+	return _finish_slot(numpy.concatenate(pieces), cell_bits, tile_bits)
+
+
 def _finish(parts, presorted, chroms, cell_bits, tile_bits, threads):
 	"""The counts of every chromosome from the units' keys: each unit's
 	keys are cut at the chromosomes' edges (sorted first where they are
-	not), each chromosome's pieces are joined, and the chromosomes are
-	sorted, counted and decoded on `threads` threads, largest first,
-	numpy's sorts and ufuncs running without the GIL. The units' arrays are
-	dropped once their pieces are joined, so the peak is the keys twice,
-	not the keys and the sorted keys and the decoded arrays at once."""
+	not), and each chromosome's pieces are joined, merged with a stable
+	sort, counted and decoded on `threads` threads, largest first, numpy's
+	sorts, copies and ufuncs running without the GIL. A unit's array is
+	dropped once every chromosome it holds a piece of is done, so the keys
+	are not held whole beside the decoded arrays."""
 
 	from concurrent.futures import ThreadPoolExecutor
+	from concurrent.futures import as_completed
 
 	shift = _POSITION_BITS + cell_bits
 	edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << shift
@@ -676,20 +707,31 @@ def _finish(parts, presorted, chroms, cell_bits, tile_bits, threads):
 
 		bounds = list(pool.map(cut, parts))
 		pieces = [[] for _ in chroms]
-		for keys, b in zip(parts, bounds):
+		owners = [[] for _ in chroms]
+		users = [0] * len(parts)
+		for i, (keys, b) in enumerate(zip(parts, bounds)):
 			for slot in numpy.flatnonzero(b[1:] > b[:-1]).tolist():
 				pieces[slot].append(keys[b[slot]:b[slot + 1]])
-		del parts, bounds
-		joined = {}
-		for slot, these in enumerate(pieces):
-			if these:
-				joined[slot] = numpy.concatenate(these)
-		del pieces
+				owners[slot].append(i)
+				users[i] += 1
+		del bounds
 
-		order = sorted(joined, key=lambda slot: -len(joined[slot]))
-		futures = {slot: pool.submit(_finish_slot, joined.pop(slot), cell_bits,
-			tile_bits) for slot in order}
-		return {chroms[slot]: futures[slot].result() for slot in order}
+		order = sorted((slot for slot in range(len(chroms)) if pieces[slot]),
+			key=lambda slot: -sum(len(piece) for piece in pieces[slot]))
+		futures = {}
+		for slot in order:
+			futures[pool.submit(_join_and_finish, pieces[slot], cell_bits,
+				tile_bits)] = slot
+			pieces[slot] = None
+		counts = {}
+		for future in as_completed(futures):
+			slot = futures[future]
+			counts[chroms[slot]] = future.result()
+			for i in owners[slot]:
+				users[i] -= 1
+				if users[i] == 0:
+					parts[i] = None
+		return {chroms[slot]: counts[chroms[slot]] for slot in order}
 	finally:
 		pool.shutdown(wait=True)
 
