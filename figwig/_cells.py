@@ -26,6 +26,7 @@ whatever the number of threads.
 """
 
 import collections
+import zlib
 
 import numpy
 
@@ -43,7 +44,10 @@ from .bam2bw import _tqdm
 
 _POSITION_BITS = 32
 _POSITION_MASK = (1 << _POSITION_BITS) - 1
+_KEY_BITS = 63
 _STREAM_BLOCK = 1 << 24
+_BGZF_EOF = (b'\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00'
+	b'\x1b\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00')
 
 
 def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
@@ -612,6 +616,21 @@ def _is_bgzf(filename):
 	return header[:4] == _IV_BGZF_HEADER and header[10:16] == _IV_BGZF_EXTRA
 
 
+def _check_bgzf_end(filename):
+	"""Raise for a BGZF file that does not end with the empty block that
+	marks its end, which a file cut at a block boundary lacks, since every
+	block before the cut would otherwise read as the whole file."""
+
+	with open(filename, 'rb') as handle:
+		handle.seek(0, 2)
+		size = handle.tell()
+		handle.seek(max(size - len(_BGZF_EOF), 0))
+		tail = handle.read()
+	if tail != _BGZF_EOF:
+		raise ValueError(("{} ends without the empty block that ends a BGZF file, "
+			"so it was cut short.").format(filename))
+
+
 def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 	"""Count each barcode's fragment ends in a fragments file.
 
@@ -672,7 +691,7 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 			"bases.".format(_POSITION_MASK))
 
 	slot_bits = max(1, int(max(len(chroms), 1) - 1).bit_length())
-	cell_bits = 63 - _POSITION_BITS - slot_bits
+	cell_bits = _KEY_BITS - _POSITION_BITS - slot_bits
 	if barcodes is not None and len(barcodes) > 1 << cell_bits:
 		raise ValueError(("--cells lists {:,} barcodes, more than the {:,} a file "
 			"with {:,} chromosomes can keep apart.").format(len(barcodes),
@@ -683,17 +702,26 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 		filename)
 	compressed = not filename.endswith(('.tsv', '.bed'))
 
+	from isal.isal_zlib import IsalError
+
+	bgzf = compressed and _is_bgzf(filename)
+	if bgzf:
+		_check_bgzf_end(filename)
+
 	bar = _tqdm(args.verbose)(disable=not args.verbose, position=idx,
 		desc=filename.split('/')[-1])
 	try:
 		keys = None
-		if threads > 1 and (not compressed or _is_bgzf(filename)):
+		if threads > 1 and (not compressed or bgzf):
 			try:
 				keys = _scan_file_units(state, compressed, bar, threads)
 			except _NotBlockGzip:
 				bar.reset()
 		if keys is None:
 			keys = _scan_file_stream(state, compressed, bar)
+	except (EOFError, IsalError, zlib.error) as e:
+		raise ValueError("{} is cut short, or is not a gzip file: {}".format(
+			filename, e))
 	finally:
 		bar.close()
 

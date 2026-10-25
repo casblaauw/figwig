@@ -318,8 +318,9 @@ def _cells_main(args, prog, cores, chrom_sizes):
 		tracks, groups = _tracks_for_cells(args.filename, args.metadata,
 			barcodes_per_file, cells, args.dtype, args.groups)
 		if len(tracks) == 0:
-			raise ValueError("no fragment of {} has a barcode in --cells.".format(
-				", ".join(args.filename)))
+			raise ValueError(("no fragment of {} was counted: {}.").format(
+				", ".join(args.filename), "none has a barcode in --cells" if cells
+				is not None else "the file holds none"))
 
 		with FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 				genome=args.genome, tile=args.tile, groups=groups, level=args.level,

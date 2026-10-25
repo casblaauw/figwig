@@ -47,6 +47,8 @@ writes nothing; writers stay usable.
 | `--barcode-column is a column number from 4`, `--barcode-column reads BED/tsv files of fragments, not X` | columns 1-3 are coordinates; a BAM has no barcode column |
 | `the line '...' does not hold a chromosome, a start, an end and a barcode in column N` | too few columns, or a coordinate that is not an integer; there is no per-line fallback in cell mode |
 | `no fragment of X is on a chromosome of SIZES; the file's chromosomes include ...` | `22` against `chr22`, or the wrong assembly |
+| `X is cut short, or is not a gzip file: ...`, `X ends without the empty block that ends a BGZF file, so it was cut short` | a truncated download; cell mode refuses it where bam2bw's own loop raises `EOFError` |
+| `no fragment of X was counted: the file holds none` | an empty file, or only `#` lines |
 | `lists a barcode more than once`, `--cells lists N barcodes, more than the M ...`, `holds more than N barcodes, which is the most a file with M chromosomes can keep apart` | a duplicate row in `--cells`; too many cells for the key layout → give `--cells` the cells to keep, or fewer chromosomes in `-s` |
 
 ## figwig files
