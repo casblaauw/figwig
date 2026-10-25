@@ -442,13 +442,18 @@ def test_key_packing_with_many_chromosomes(tmp_path):
 	reader = FigWigReader(out)
 	names = [track["name"] for track in reader.tracks]
 	assert names == list(dict.fromkeys(barcode for *_, barcode in rows))
-	expected = numpy.zeros((3000, 50, 50_000), dtype=numpy.int64)
+	chosen = set(rng.choice(3000, 20, replace=False).tolist()) | {int(
+		rows[0][0][1:])}
+	expected = {k: numpy.zeros((50, 50_000), dtype=numpy.int64) for k in chosen}
+	totals = numpy.zeros(50, dtype=numpy.int64)
 	for chrom, start, end, barcode in rows:
-		expected[int(chrom[1:]), names.index(barcode), [start, end - 1]] += 1
-	for k in rng.choice(3000, 20, replace=False):
+		totals[names.index(barcode)] += 2
+		if int(chrom[1:]) in chosen:
+			expected[int(chrom[1:])][names.index(barcode), [start, end - 1]] += 1
+	for k in chosen:
 		y = reader.read("c{}".format(k), [0], 50_000, dtype="int64")[0]
 		numpy.testing.assert_array_equal(y, expected[k])
-	numpy.testing.assert_array_equal(reader.stats["sum"], expected.sum(axis=(0, 2)))
+	numpy.testing.assert_array_equal(reader.stats["sum"], totals)
 
 
 def test_too_many_cells_for_the_key(tmp_path, fragments, sizes, monkeypatch):
