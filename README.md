@@ -37,7 +37,7 @@ integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
 | Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
 | A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
 | 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
-| Convert 257.6 million 10x fragments to 10,246 per-cell tracks | **21 s** at `-p 8`, 18 GB peak | 145 s, 24 GB, a pandas recipe; 225 s, 8 GB, SnapATAC2 (fragments, not counts) |
+| Convert 257.6 million 10x fragments to 10,246 per-cell tracks | **10 s** at `-p 8`, 19 GB peak | 140 s, 24 GB, a pandas recipe; 217 s, 8 GB, SnapATAC2 (fragments, not counts) |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
