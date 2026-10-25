@@ -105,6 +105,33 @@ figwig's bigWigs are 3% larger because they are compressed at level 1
 rather than pyBigWig's level 6. The first call in a new environment also
 compiles figwig's kernels, which took 1.1 s on the tiny input.
 
+Coverage of every aligned base
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``figwig bam2bw -c -u`` and deepTools 4.0.0's ``bamCoverage --binSize 1``
+each wrote the coverage of the same BAM's reads to one bigWig, on tmpfs,
+one run each at a load of 38 to 40, with the peak memory of the process
+tree sampled every 50 ms; ``figwig bam2fw -c -u`` wrote it as a figwig
+file. The two bigWigs hold the same value at every one of hg38's
+3,099,750,718 bases.
+
+====================================  ========  ========  ========  ========
+command                               threads   time      peak RSS  output
+====================================  ========  ========  ========  ========
+``figwig bam2bw -c -u``               1         11.9 s    1.6 GB    193 MB
+``figwig bam2bw -c -u``               8         3.4 s     2.0 GB    193 MB
+``figwig bam2bw -c -u``               32        3.7 s     2.0 GB    193 MB
+``figwig bam2fw -c -u``               8         14.4 s    2.2 GB    79 MB
+``bamCoverage --binSize 1``           1         46.2 s    1.3 GB    249 MB
+``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
+====================================  ========  ========  ========  ========
+
+The coverage is two events per read on the readers and sorts the end
+counts use, so it costs about what ``-f`` costs; the figwig file is a
+runs chunk per tile, which is why ``bam2fw`` takes longer to write and
+less space. deepTools' time is its own reading of the BAM through pysam,
+a process per thread.
+
 Every file of a test-data collection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

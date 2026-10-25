@@ -93,6 +93,7 @@ def tsv_gz(data_dir):
 def bam2bw(tmp_path, filename, sizes, *flags):
 	"""`figwig bam2bw` on one file, as the bigWigs it wrote."""
 
+	os.makedirs(tmp_path, exist_ok=True)
 	name = str(tmp_path / ("bw_" + os.path.basename(filename)))
 	figwig.bam2bw.main([filename, "-s", sizes, "-n", name] + list(flags),
 		prog="figwig bam2bw")
@@ -685,3 +686,185 @@ def test_infinite_scale_factor_is_refused(tmp_path, fragments, sizes):
 	path = bam2fw(tmp_path / "zero", [fragments], sizes, "--barcode-column", "4",
 		"-f", "-sf", "0")
 	assert FigWigReader(path).stats["sum"].tolist() == [0, 0, 0]
+
+
+# --coverage: every base from a read's start to its end.
+
+COVERAGE_READS = [
+	("chr1", 100, 50, False),
+	("chr1", 100, 50, False),
+	("chr1", 120, 30, True),
+	("chr1", 140, 40, False),
+	("chr1", 980, 30, True),
+	("chr2", 0, 25, False),
+	("chr2", 490, 20, True),
+	("chr3", 0, 10, False),
+	("chrUN", 10, 10, False),
+]
+
+
+@pytest.fixture(scope="session")
+def coverage_bam(data_dir):
+	return str(write_bam(data_dir / "coverage.bam", BAM_CHROM_SIZES,
+		COVERAGE_READS))
+
+
+@pytest.fixture(scope="session")
+def coverage_bed(data_dir):
+	return str(write_intervals(data_dir / "coverage.bed", [(chrom, start, start +
+		length) for chrom, start, length, _ in COVERAGE_READS]))
+
+
+def pileup(pos_shift=0, neg_shift=0, stranded=True):
+	"""Every base from each read's shifted start to its shifted end, per
+	strand, clipped to the chromosome: the oracle for --coverage."""
+
+	expected = {chrom: {"+": numpy.zeros(n), "-": numpy.zeros(n)} for chrom, n
+		in CHROM_SIZES}
+	for chrom, start, length, reverse in COVERAGE_READS:
+		if chrom not in expected:
+			continue
+		a, b = start + pos_shift, start + length + neg_shift
+		expected[chrom]["-" if reverse and stranded else "+"][max(a, 0):max(
+			b, 0)] += 1
+	return expected
+
+
+def assert_coverage(bigwigs, expected, strands, scale=1.0):
+	for chrom, length in CHROM_SIZES:
+		for path, strand in zip(bigwigs, strands):
+			numpy.testing.assert_array_equal(bigwig_values(path, chrom, length),
+				(expected[chrom][strand] * scale).astype(numpy.float32))
+
+
+@pytest.mark.parametrize("flags, shifts", [((), (0, 0)), (("-u",), (0, 0)),
+	(("-ps", "4", "-ns", "-5"), (4, -5)), (("-p", "2"), (0, 0))])
+def test_coverage_is_the_pileup_of_read_spans(tmp_path, coverage_bam, sizes,
+		flags, shifts):
+	stranded = "-u" not in flags
+	bigwigs = bam2bw(tmp_path, coverage_bam, sizes, "-c", *flags)
+	expected = pileup(*shifts, stranded=stranded)
+	strands = ["+", "-"] if stranded else ["+"]
+	assert_coverage(bigwigs, expected, strands)
+
+	path = bam2fw(tmp_path, [coverage_bam], sizes, "-c", *flags)
+	reader = FigWigReader(path)
+	names = ["coverage"] if "-u" in flags else ["coverage.+", "coverage.-"]
+	assert [track["name"] for track in reader.tracks] == names
+	assert [track["group"] for track in reader.tracks] == list(range(len(names)))
+	assert reader.tracks[0]["dtype"] == "uint8"
+	assert_tracks_match_bigwigs(path, names, bigwigs)
+
+
+def test_coverage_of_a_bed_file_and_of_a_sam_file(tmp_path, coverage_bam,
+		coverage_bed, sizes):
+	import pysam
+
+	expected = pileup(stranded=False)
+	assert_coverage(bam2bw(tmp_path, coverage_bed, sizes, "-c", "-u"), expected,
+		["+"])
+	assert_coverage(bam2bw(tmp_path / "threads", coverage_bed, sizes, "-c", "-u",
+		"-p", "2"), expected, ["+"])
+	sam = str(tmp_path / "coverage.sam")
+	pysam.view("-h", "-o", sam, coverage_bam, catch_stdout=False)
+	assert_coverage(bam2bw(tmp_path / "sam", sam, sizes, "-c"), pileup(),
+		["+", "-"])
+
+
+def test_coverage_scaling_and_depth(tmp_path, coverage_bam, sizes):
+	expected = pileup()
+	assert_coverage(bam2bw(tmp_path, coverage_bam, sizes, "-c", "-sf", "0.5"),
+		expected, ["+", "-"], scale=0.5)
+	# The depth is the reads that start inside their chromosome: every read
+	# but the one on chrUN, 8.
+	assert_coverage(bam2bw(tmp_path / "r", coverage_bam, sizes, "-c", "-r"),
+		expected, ["+", "-"], scale=1 / 8)
+	path = bam2fw(tmp_path / "fw", [coverage_bam], sizes, "-c", "-r", "-sf",
+		"2")
+	reader = FigWigReader(path)
+	for chrom, length in CHROM_SIZES:
+		y = reader.read(chrom, [0], length, dtype="float64")
+		numpy.testing.assert_allclose(y[0, 0], expected[chrom]["+"] * 2 / 8)
+
+
+def test_coverage_reports_the_bases_clipped_away(tmp_path, coverage_bam, sizes,
+		capsys):
+	bam2bw(tmp_path, coverage_bam, sizes, "-c")
+	out = capsys.readouterr().out
+	# chr1:980+30 runs 10 bases past 1000, chr2:490+20 runs 10 past 500.
+	assert "20 entries fell outside the provided chromosome sizes" in out
+	assert "chr1: 10" in out and "chr2: 10" in out
+
+
+def test_coverage_refuses_what_it_cannot_mean(tmp_path, coverage_bam, fragments,
+		sizes):
+	# argparse refuses -c with -f or -3p, with its own message on stderr.
+	with pytest.raises(SystemExit):
+		bam2bw(tmp_path, coverage_bam, sizes, "-c", "-f")
+	with pytest.raises(SystemExit):
+		bam2bw(tmp_path, coverage_bam, sizes, "-c", "-3p")
+	with pytest.raises(ValueError, match="--coverage does not take --mate_pairs"):
+		bam2bw(tmp_path, coverage_bam, sizes, "-c", "-mp")
+	with pytest.raises(SystemExit, match="--coverage is not taken with it"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-c")
+
+
+def test_coverage_counts_aligned_blocks(tmp_path, sizes):
+	"""A spliced read covers its two exons and not the intron, a deletion is
+	not covered, an insertion and soft clips consume no reference, and the
+	shifts move the first base and the end: pysam's blocks, as deepTools
+	counts them, from the kernel and from the pysam loop alike."""
+
+	import pysam
+
+	header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": chrom,
+		"LN": length} for chrom, length in BAM_CHROM_SIZES]}
+	records = [("chr1", 100, "20M30N20M", False), ("chr1", 200, "10M5D10M", True),
+		("chr1", 300, "5S10M3I10M5S", False), ("chr1", 400, "30M", False),
+		("chr2", 10, "40I", False)]
+	path = str(tmp_path / "blocks.bam")
+	with pysam.AlignmentFile(path, "wb", header=header) as handle:
+		for k, (chrom, start, cigar, reverse) in enumerate(records):
+			read = pysam.AlignedSegment(handle.header)
+			read.query_name = "r{}".format(k)
+			read.reference_id = handle.get_tid(chrom)
+			read.reference_start = start
+			read.cigarstring = cigar
+			read.flag = 16 if reverse else 0
+			read.mapping_quality = 60
+			length = sum(n for n, op in [(int(x), y) for x, y in __import__(
+				"re").findall(r"(\d+)([MIDNSHP=X])", cigar)] if op in "MIS=X")
+			read.query_sequence = "A" * length
+			handle.write(read)
+	pysam.index(path)
+	sam = str(tmp_path / "blocks.sam")
+	pysam.view("-h", "-o", sam, path, catch_stdout=False)
+
+	expected = {"+": numpy.zeros(1000), "-": numpy.zeros(1000)}
+	expected["+"][100:120] += 1
+	expected["+"][150:170] += 1
+	expected["-"][200:210] += 1
+	expected["-"][215:225] += 1
+	expected["+"][300:320] += 1
+	expected["+"][400:430] += 1
+	for source in (path, sam):
+		for strand, bigwig in zip("+-", bam2bw(tmp_path / ("out_" + os.path.basename(
+				source)[-3:]), source, sizes, "-c")):
+			numpy.testing.assert_array_equal(bigwig_values(bigwig, "chr1", 1000),
+				expected[strand].astype(numpy.float32))
+	shifted = {"+": numpy.zeros(1000), "-": numpy.zeros(1000)}
+	shifted["+"][104:120] += 1
+	shifted["+"][150:165] += 1
+	shifted["-"][204:210] += 1
+	shifted["-"][215:220] += 1
+	shifted["+"][304:315] += 1
+	shifted["+"][404:425] += 1
+	for strand, bigwig in zip("+-", bam2bw(tmp_path / "shift", path, sizes, "-c",
+			"-ps", "4", "-ns", "-5")):
+		numpy.testing.assert_array_equal(bigwig_values(bigwig, "chr1", 1000),
+			shifted[strand].astype(numpy.float32))
+	# A shift that empties a read leaves it uncovered rather than negative.
+	for strand, bigwig in zip("+-", bam2bw(tmp_path / "empty", path, sizes, "-c",
+			"-ps", "40")):
+		values = bigwig_values(bigwig, "chr1", 1000)
+		assert values.min() >= 0 and values[440:470].sum() == 0

@@ -42,6 +42,7 @@ writes nothing; writers stay usable.
 | `Filenames must end in one of .bam, .sam, .tsv, .tsv.gz, .bed, .bed.gz.` | → rename, `.txt.gz` to `.tsv.gz` |
 | `-p/--parallel must be a number of cores, or negative to count back from the number of CPUs, not 0.` | → `-p 8`, or `-p -1` |
 | `--mate_pairs only supports BAM/SAM input files.` | → drop `-mp` on BED/tsv |
+| `--coverage does not take --mate_pairs`, `argument -f/--fragments: not allowed with argument -c/--coverage`, `--barcode-column counts each cell's fragment ends; --coverage is not taken with it` | `-c` with a mode that fixes one position per read or pair, or with per-cell counting → one of `-c`, `-f`, `-3p`, `-mp` |
 | the minus-strand bigWig is empty | BED/tsv has no strand → `-u` |
 | `X encountered in input but not in FASTA/chrom sizes.` (with `-v`) | expected for decoys and unplaced contigs; otherwise a naming mismatch or the wrong assembly |
 | `--barcode-column is a column number from 4`, `--barcode-column reads BED/tsv files of fragments, not X` | columns 1-3 are coordinates; a BAM has no barcode column |

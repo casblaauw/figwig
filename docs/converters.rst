@@ -142,7 +142,12 @@ as entries with ``write_sparse``, which encodes them on the ``-p``
 threads, at compression level 1, like ``figwig bam2bw``'s, unless ``-l``
 says otherwise. A file's tracks read from the figwig file exactly as the bigWigs
 ``figwig bam2bw`` writes from that file alone read with ``read_bigwig``. It
-needs the ``bam2bw`` extra and runs on Linux and macOS.
+needs the ``bam2bw`` extra and runs on Linux and macOS. With ``-c`` each
+file's tracks hold the coverage of its reads' aligned bases, as
+:doc:`figwig bam2bw -c <bam2bw>` counts it, written as runs, each track its
+own group, since a stretch of one value costs a runs chunk a few bytes
+where entries would cost one per base; ``-c`` is not taken with
+``--barcode-column``.
 
 ``--barcode-column N`` writes a fragments file as one track per cell
 instead: column ``N`` (from 1; 4 in a Cell Ranger fragments file) holds
@@ -168,7 +173,7 @@ the other ways of making a per-cell file.
 
 .. code-block:: text
 
-    usage: figwig bam2fw [-h] -s SIZES [-u] [-f | -3p] [-ps POS_SHIFT]
+    usage: figwig bam2fw [-h] -s SIZES [-u] [-f | -3p | -c] [-ps POS_SHIFT]
                          [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                          [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
                          -n NAME [-m METADATA] [-g GENOME]
