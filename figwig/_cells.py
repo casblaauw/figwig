@@ -23,7 +23,10 @@ order the writer's encoders take, tile by tile and track by track within
 one, and the writer is told not to sort them again.
 
 Barcodes are either listed up front (`--cells`), in which case every
-thread shares one table and an unlisted barcode is skipped, or discovered
+thread shares one table and the kernel skips an unlisted barcode itself
+(returning to Python for each of the hundreds of thousands of barcodes a
+raw 10x file holds beside its cells, on every thread, was the serial cost
+that stopped the scan gaining past four threads), or discovered
 as they appear, in which case each unit of the file is scanned against a
 copy of the table and the barcodes it finds are numbered in file order
 afterwards, so that the tracks come out in order of first appearance
@@ -58,7 +61,7 @@ _BGZF_EOF = (b'\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00'
 def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 	name_data, name_offsets, name_slots, cell_hash, cell_name, cell_data,
 	cell_offsets, cell_slots, field, cell_bits, tile_bits, sizes, dropped,
-	skipped, mode, pos_shift, neg_shift):
+	skipped, keep_all, mode, pos_shift, neg_shift):
 	"""Scan the lines of buf[i:n], which ends at a newline or at the end of
 	the file, appending one key per recorded end of each fragment whose
 	barcode, in column `field` (from 0), has a cell number in the barcode
@@ -68,9 +71,10 @@ def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 
 	Returns (status, i, n_lines, n_keys, a, b). Status 0: every line was
 	scanned. Status 1: the chromosome name buf[a:b] is not in the name
-	table; status 4: the barcode buf[a:b] is not in the barcode table; status
-	2: keys is full. For those three, i is the start of the line to resume
-	from once the caller has added the name or grown keys. Status 3: the line
+	table; status 4: the barcode buf[a:b] is not in the barcode table, which
+	is returned only with `keep_all`, since otherwise an unknown barcode is
+	one not kept; status 2: keys is full. For those three, i is the start of
+	the line to resume from once the caller has added the name or grown keys. Status 3: the line
 	buf[a:b] cannot be read.
 
 	mode is 0 to record the start, 1 to record end - 1, and 2 to record both.
@@ -251,9 +255,11 @@ def _scan_cells(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 				j = (j + 1) & cell_mask
 
 			if found < 0:
-				return 4, line_start, n_lines, n_keys, a3, b3
-
-			cell = cell_slots[found]
+				if keep_all:
+					return 4, line_start, n_lines, n_keys, a3, b3
+				cell = -1
+			else:
+				cell = cell_slots[found]
 			cell_a = a3
 			cell_b = b3
 			cell_prev = cell
@@ -430,8 +436,8 @@ class _CellScan:
 				table.name_offsets, table.name_slots, cells.table_hash,
 				cells.table_name, cells.name_data, cells.name_offsets,
 				cells.name_slots, self.field, self.cell_bits, self.tile_bits,
-				self.sizes, dropped, skipped, self.mode, args.pos_shift,
-				args.neg_shift)
+				self.sizes, dropped, skipped, self.keep_all, self.mode,
+				args.pos_shift, args.neg_shift)
 
 			if status == 0:
 				return keys, n_keys, n_lines
@@ -445,16 +451,13 @@ class _CellScan:
 				keys = grown
 			elif status == 4:
 				data = bytes(buf[a:b])
-				if self.keep_all:
-					if cells.n_kept >= 1 << self.cell_bits:
-						raise ValueError(("{} holds more than {:,} barcodes, which is "
-							"the most a file with {:,} chromosomes can keep apart; "
-							"give --cells the barcodes to keep.").format(self.filename,
-							1 << self.cell_bits, len(self.sizes)))
-					cells.add(data, cells.n_kept)
-					new_cells.append(data)
-				else:
-					cells.add(data, -1)
+				if cells.n_kept >= 1 << self.cell_bits:
+					raise ValueError(("{} holds more than {:,} barcodes, which is "
+						"the most a file with {:,} chromosomes can keep apart; "
+						"give --cells the barcodes to keep.").format(self.filename,
+						1 << self.cell_bits, len(self.sizes)))
+				cells.add(data, cells.n_kept)
+				new_cells.append(data)
 			else:
 				line = bytes(buf[a:b]).decode('ascii', errors='replace')
 				raise ValueError(("{}: the line {!r} does not hold a chromosome, "
@@ -507,9 +510,9 @@ def _scan_file_units(state, compressed, bar, threads):
 		if table is None:
 			table = local.table = state.table.copy()
 		if cells is None:
-			cells = getattr(local, 'cells', None)
-			if cells is None:
-				cells = local.cells = state.cells.copy()
+			# Listed barcodes: one table, read by every thread and added to
+			# by none.
+			cells = state.cells
 
 		names, new_cells = [], []
 		first_new = cells.n_kept
