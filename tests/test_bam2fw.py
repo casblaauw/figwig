@@ -665,7 +665,10 @@ def test_entries_arrive_in_the_writers_order(tmp_path, sizes):
 
 	with FigWigWriter(str(tmp_path / "dup.fw"), CHROM_SIZES, ["a", "b"],
 			groups=2) as writer:
-		writer._sorted_entries = True
 		with pytest.raises(ValueError, match="entries 1 and 2 both name base 5"):
 			writer.write_sparse("chr1", [3, 5, 5], [0, 1, 1], [1, 1, 1])
+		writer._sorted_entries = True
+		with pytest.raises(ValueError, match="entry 2 on 'chr1' is at 2000, "
+				"outside the chromosome"):
+			writer.write_sparse("chr1", [3, 5, 2000], [0, 1, 1], [1, 1, 1])
 		writer.write_sparse("chr1", [3, 5], [0, 1], [1, 1])

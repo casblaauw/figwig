@@ -555,6 +555,27 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 
 @numba.njit(nogil=True, cache=True)
+def _tile_cuts(positions, tile, per_batch):
+	"""Where to cut entries sorted by tile into batches of whole tiles
+	holding at least `per_batch` entries each, but for the last: the start
+	of each batch and the end, as an int64 array. Only the entries around
+	each cut are looked at."""
+
+	n = positions.shape[0]
+	cuts = [0]
+	at = 0
+	while at < n:
+		end = min(at + per_batch, n)
+		if end < n:
+			t = positions[end - 1] // tile
+			while end < n and positions[end] // tile == t:
+				end += 1
+		cuts.append(end)
+		at = end
+	return numpy.array(cuts, dtype=numpy.int64)
+
+
+@numba.njit(nogil=True, cache=True)
 def _finish_chunk(out, end):
 	"""Zero the padding after a chunk; returns where the next one starts."""
 

@@ -353,12 +353,13 @@ def _cells_main(args, prog, cores, chrom_sizes):
 					if chrom not in counts:
 						continue
 					positions, cell_ids, values = counts[chrom]
-					values = values.astype(numpy.float64)
-					values *= args.scale_factor
+					if args.scale_factor != 1:
+						values *= args.scale_factor
 					if read_depth is not None:
 						values /= read_depth
-					writer.write_sparse(chrom, positions, cell_ids.astype(numpy.int64) + offset,
-						values)
+					if offset > 0:
+						cell_ids += offset
+					writer.write_sparse(chrom, positions, cell_ids, values)
 				offset += len(barcodes)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)

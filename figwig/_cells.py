@@ -522,9 +522,15 @@ def _scan_file_units(state, compressed, bar, threads):
 		keys, n_keys, n_lines = state.scan_lines(numpy.frombuffer(text,
 			dtype=numpy.uint8), start, end, keys, 0, table, cells, names,
 			new_cells, dropped, skipped)
+		keys = keys[:n_keys]
+		if not state.keep_all:
+			# Sorted here, on the thread, so that each chromosome's keys are
+			# runs the final sort merges; with barcodes still being numbered
+			# the keys are sorted once they have their numbers.
+			keys.sort()
 
-		return (True, bytes(text[:start]), bytes(text[end:]), keys[:n_keys],
-			n_lines, names, (first_new, new_cells), (dropped, skipped))
+		return (True, bytes(text[:start]), bytes(text[end:]), keys, n_lines,
+			names, (first_new, new_cells), (dropped, skipped))
 
 	parts = []
 	carry = bytearray()
@@ -581,9 +587,7 @@ def _scan_file_units(state, compressed, bar, threads):
 		pool.shutdown(wait=True, cancel_futures=True)
 
 	state.missing = list(dict.fromkeys(state.missing))
-	if parts:
-		return numpy.concatenate(parts)
-	return numpy.empty(0, dtype=numpy.int64)
+	return parts, not state.keep_all
 
 
 def _scan_file_stream(state, compressed, bar):
@@ -623,7 +627,71 @@ def _scan_file_stream(state, compressed, bar):
 			if len(block) == 0:
 				break
 
-	return keys[:n_keys]
+	return [keys[:n_keys]], False
+
+
+def _finish_slot(keys, cell_bits, tile_bits):
+	"""One chromosome's keys, sorted and counted: (positions, cells,
+	counts) as int64, int64 and float64, the form the writer takes without
+	a copy. The keys come as sorted runs, one per unit of the file, which
+	the stable sort merges in about one pass."""
+
+	keys.sort(kind='stable')
+	n = len(keys)
+	first = numpy.empty(n, dtype=bool)
+	first[0] = True
+	numpy.not_equal(keys[1:], keys[:-1], out=first[1:])
+	starts = numpy.flatnonzero(first)
+	del first
+	distinct = keys[starts]
+	counts = numpy.diff(starts, append=n).astype(numpy.float64)
+	del starts
+	cells = (distinct >> tile_bits) & ((1 << cell_bits) - 1)
+	positions = (distinct >> (tile_bits + cell_bits)) & (_POSITION_MASK >>
+		tile_bits)
+	positions <<= tile_bits
+	positions |= distinct & ((1 << tile_bits) - 1)
+	return positions, cells, counts
+
+
+def _finish(parts, presorted, chroms, cell_bits, tile_bits, threads):
+	"""The counts of every chromosome from the units' keys: each unit's
+	keys are cut at the chromosomes' edges (sorted first where they are
+	not), each chromosome's pieces are joined, and the chromosomes are
+	sorted, counted and decoded on `threads` threads, largest first,
+	numpy's sorts and ufuncs running without the GIL. The units' arrays are
+	dropped once their pieces are joined, so the peak is the keys twice,
+	not the keys and the sorted keys and the decoded arrays at once."""
+
+	from concurrent.futures import ThreadPoolExecutor
+
+	shift = _POSITION_BITS + cell_bits
+	edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << shift
+	pool = ThreadPoolExecutor(threads)
+	try:
+		def cut(keys):
+			if not presorted:
+				keys.sort()
+			return numpy.searchsorted(keys, edges)
+
+		bounds = list(pool.map(cut, parts))
+		pieces = [[] for _ in chroms]
+		for keys, b in zip(parts, bounds):
+			for slot in numpy.flatnonzero(b[1:] > b[:-1]).tolist():
+				pieces[slot].append(keys[b[slot]:b[slot + 1]])
+		del parts, bounds
+		joined = {}
+		for slot, these in enumerate(pieces):
+			if these:
+				joined[slot] = numpy.concatenate(these)
+		del pieces
+
+		order = sorted(joined, key=lambda slot: -len(joined[slot]))
+		futures = {slot: pool.submit(_finish_slot, joined.pop(slot), cell_bits,
+			tile_bits) for slot in order}
+		return {chroms[slot]: futures[slot].result() for slot in order}
+	finally:
+		pool.shutdown(wait=True)
 
 
 def _is_bgzf(filename):
@@ -685,9 +753,9 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0,
 	counts: dict
 		Chromosome name -> (positions, cells, counts), the distinct
 		(position, cell) pairs with fragment ends and how many each has, as
-		uint32, int32 and uint32 arrays, sorted by tile, then cell, then
+		int64, int64 and float64 arrays, sorted by tile, then cell, then
 		position: the order `FigWigWriter.write_sparse` encodes in when the
-		cells are one group.
+		cells are one group, in the types it takes without a copy.
 
 	barcodes: list of str
 		The barcodes kept, cell number i being barcodes[i].
@@ -735,54 +803,23 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0,
 	bar = _tqdm(args.verbose)(disable=not args.verbose, position=idx,
 		desc=filename.split('/')[-1])
 	try:
-		keys = None
+		parts = None
 		if threads > 1 and (not compressed or bgzf):
 			try:
-				keys = _scan_file_units(state, compressed, bar, threads)
+				parts, presorted = _scan_file_units(state, compressed, bar, threads)
 			except _NotBlockGzip:
 				bar.reset()
-		if keys is None:
-			keys = _scan_file_stream(state, compressed, bar)
+		if parts is None:
+			parts, presorted = _scan_file_stream(state, compressed, bar)
 	except (EOFError, IsalError, zlib.error) as e:
 		raise ValueError("{} is cut short, or is not a gzip file: {}".format(
 			filename, e))
 	finally:
 		bar.close()
 
-	# One in-place sort, then the runs of equal keys; the arrays handed on
-	# are 32-bit, which every position, cell number and count fits, so that
-	# a file of hundreds of millions of ends holds at most about three
-	# copies of its keys at the peak.
-	keys.sort()
-	counts = {}
-	n_keys = len(keys)
-	if n_keys > 0:
-		first = numpy.empty(n_keys, dtype=bool)
-		first[0] = True
-		numpy.not_equal(keys[1:], keys[:-1], out=first[1:])
-		starts = numpy.flatnonzero(first)
-		del first
-
-		distinct = keys[starts]
-		del keys
-		run_lengths = numpy.diff(starts, append=n_keys).astype(numpy.uint32)
-		del starts
-
-		edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << (
-			_POSITION_BITS + cell_bits)
-		bounds = numpy.searchsorted(distinct, edges)
-		cells = ((distinct >> tile_bits) & ((1 << cell_bits) - 1)).astype(
-			numpy.int32)
-		positions = ((distinct >> (tile_bits + cell_bits)) & (_POSITION_MASK >>
-			tile_bits)).astype(numpy.uint32)
-		positions <<= tile_bits
-		positions |= (distinct & ((1 << tile_bits) - 1)).astype(numpy.uint32)
-		del distinct
-
-		for slot in numpy.flatnonzero(bounds[1:] > bounds[:-1]):
-			lo, hi = int(bounds[slot]), int(bounds[slot + 1])
-			counts[chroms[slot]] = (positions[lo:hi], cells[lo:hi],
-				run_lengths[lo:hi])
+	parts = [keys for keys in parts if len(keys) > 0]
+	counts = _finish(parts, presorted, chroms, cell_bits, tile_bits, threads)
+	del parts
 
 	if barcodes is None:
 		table = state.cells
