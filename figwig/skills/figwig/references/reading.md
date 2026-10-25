@@ -1,18 +1,9 @@
 # Reading bigWigs
 
-## Signatures
-
-```python
-BigWigReader(path)        # reads the header and chromosome tree now
-reader.chrom_sizes        # {name: length} in the file's order; ENCODE's is chr1, chr10, chr11, ...
-reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)
-read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)
-```
-
-| `bigwigs` given as | Result, float32 |
-|---|---|
-| one path or one `BigWigReader` | `(n, width)` |
-| a list or tuple, even of one file | `(n, len(bigwigs), width)`; channel `i` is `bigwigs[i]` |
+`BigWigReader(path).read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)`
+and `read_bigwig(bigwigs, chroms, starts, width, ...)`, where `bigwigs` is
+one path or reader (result `(n, width)`) or a list, even of one (result
+`(n, len(bigwigs), width)`, channel `i` from `bigwigs[i]`). Always float32.
 
 ```python
 import numpy
@@ -32,86 +23,56 @@ print(y.shape)
 
 ## Arguments
 
-- `chroms` is one name for every window, or one per window as a list, numpy
-  array or pandas Series.
-- `starts` must be integers. Floats raise `TypeError: starts must be
-  integers, not float64.` A pandas column that once held a NaN is float64, so
-  cast it with `.astype("int64")`.
-- A window that starts before 0 raises `ValueError`. Clip windows centred on
-  summits: `numpy.maximum(summits - width // 2, 0)`. A window may run past
-  the end of its chromosome; those bases are NaN.
-- `width` is one width for every window. For regions of several lengths,
-  read the longest width and mask, or make one call per width. One call per
-  region gives up the speed.
-- Windows may overlap, repeat and come in any order.
+- `chroms`: one name for every window, or one per window (list, array,
+  pandas Series). `starts`: integers; a pandas column that once held a NaN
+  is float64 and raises `TypeError`, so `.astype("int64")` it.
+- A window starting before 0 raises: clip summit-centred windows with
+  `numpy.maximum(summits - width // 2, 0)`. Past the end of a chromosome is
+  allowed; those bases are NaN.
+- One `width` per call. Regions of several lengths: read at the longest and
+  mask, or one call per width. One call per region throws away the speed.
 
 ## Values
 
 | Base | Value |
 |---|---|
-| covered by an interval | the interval's value, copied from the file's float32 |
+| covered by an interval | the interval's float32 value, copied, never computed |
 | covered by no interval | `missing`, 0.0 unless given |
 | covered by an interval whose value is NaN | `missing`, or NaN with `keep_nan=True` |
 | past the end of its chromosome | NaN, whatever `missing` is |
 | on a chromosome the file does not have | `missing`, with one `UserWarning` per read |
 
-`missing=numpy.nan` gives pyBigWig's `values()`, and the default gives
-pybigtools' `values()`. Pass NaN when a measured 0 must be told apart from no
-data.
-
-figwig does not use zoom levels. For binned values, average bins of bases:
-`y.reshape(len(y), -1, 32).mean(axis=-1)`, or `numpy.nanmean` when windows
-run past chromosome ends.
-
-## Reuse the reader
-
-`read_bigwig` given paths opens every file and reads its data index on every
-call. A `BigWigReader` reads its index on its first `read` and keeps it. In a
-loop, open the readers once and pass them:
-
-```python
-import numpy
-from figwig import BigWigReader
-from figwig import read_bigwig
-
-readers = [BigWigReader("ENCFF830RWF.bigWig"), BigWigReader("ENCFF989SAK.bigWig")]
-starts = numpy.arange(1_000_000, 2_000_000, 1000)
-out = numpy.empty((100, 2, 1000), dtype=numpy.float32)
-totals = numpy.zeros(2)
-for i in range(0, len(starts), 100):
-	read_bigwig(readers, "chr1", starts[i:i + 100], 1000, out=out)
-	totals += out.sum(axis=(0, 2))
-print(totals)
-# [ 28857. 195167.]
-```
-
-`out` must be a writeable, C-contiguous float32 array of the result's shape.
-A read that raises on an unreadable data block may already have written other
-windows into it. One reader can be read from several threads at once, and
-holds no open file between reads.
+Defaults match pybigtools' `values()`; `missing=numpy.nan` matches pyBigWig's.
+Pass NaN when a measured 0 must be told from no data. No zoom levels are
+used: binned values are a reshape, `y.reshape(len(y), -1, 32).mean(axis=-1)`
+(`numpy.nanmean` if windows pass chromosome ends).
 
 ## Chromosome names
 
-```
-UserWarning: 2 windows are on chromosomes not in ENCFF830RWF.bigWig, and are
-0.0 throughout: '1', '2'. Its chromosomes include 'chr1', 'chr10', 'chr11'.
-```
+A writer leaves out chromosomes without data, so a window on one is
+`missing` throughout, with a warning naming the chromosomes and some of the
+file's own. The same warning is what `1` against `chr1` looks like: check
+`set(chroms) - set(reader.chrom_sizes)` before reading, and map names in the
+call (`numpy.char.add("chr", chroms)`) rather than renaming your tables.
+`reader.chrom_sizes` is in the file's order, which is name order (`chr1`,
+`chr10`, `chr11`, …) in ENCODE and UCSC files. Under pytest's
+`filterwarnings = error` the warning is an exception.
 
-Either the sample has no data there, since writers leave out chromosomes
-without data, or the names differ (`1` against `chr1`). Check before reading
-with `set(chroms) - set(reader.chrom_sizes)`. To keep your own names, map
-them only in the call, such as `numpy.char.add("chr", chroms)`; a writer
-writes whatever names its `chrom_sizes` holds. Under pytest's
-`filterwarnings = error`, the warning is an exception.
+## Reuse the reader
+
+A path given to `read_bigwig` opens the file and reads its index on every
+call; a `BigWigReader` reads the index on its first `read` and keeps it, so
+in a loop open the readers once and pass them. `out=` must be a writeable,
+C-contiguous float32 array of the result's shape; a read that raises on an
+unreadable block may already have written other rows into it. One reader
+can be read from several threads and holds no open file between reads.
 
 ## PyTorch
 
-Make each dataset item a whole batch, read in one call: a `BatchSampler`
-over a `RandomSampler` hands `__getitem__` a new mix of indices each epoch,
-with `batch_size=None` on the loader. Read once in the main process, so that
-each worker's pickled copy of the reader carries the index instead of reading
-it again. A `BigWigReader` pickles under any start method. The workers
-already run in parallel, so read on one thread in each:
+Each item is a whole batch read in one call, from a `BatchSampler` over a
+`RandomSampler` with `batch_size=None` on the loader. Read once in the main
+process so each worker's pickled reader carries the index. The workers are
+the parallelism: `n_jobs=1` inside them.
 
 ```python
 import numpy
@@ -144,17 +105,17 @@ if __name__ == '__main__':
 	# torch.Size([1000, 1000]) 28857.0
 ```
 
-`persistent_workers=True` keeps the workers, and their readers, from one
-epoch to the next. For several tracks, keep a list of readers and call
-`read_bigwig(readers, ...)` in `__getitem__`. For random shifts, read windows
-wider by twice the largest shift and slice each example.
-
-When every window fits in memory, read them all once and wrap the result with
-`torch.from_numpy`, which does not copy. 88,971 windows of 1,000 bp from two
-bigWigs (712 MB) took 0.27 s on 8 threads, where an epoch streamed by 4
-workers took 1.7 s, on the machine in `references/threads-and-memory.md`.
+For several tracks keep a list of readers and call `read_bigwig(readers, ...)`.
+For random shifts read windows wider by twice the largest shift and slice.
+When every window fits in memory, read them all in one call and index the
+array each step: one read on 8 threads beats an epoch streamed by workers.
+Many tracks read every epoch want a figwig file (`references/figwig-reading.md`).
 
 ## Falling back to another reader
+
+figwig refuses what it cannot read exactly (bigBed, big-endian, corrupt or
+truncated indexes, overlapping intervals, unknown section types) with
+`ValueError`. Its tests check it against pybigtools bit for bit, so:
 
 ```python
 import numpy
@@ -170,6 +131,7 @@ def read(path, chroms, starts, width):
 			start in zip(chroms, starts)], dtype=numpy.float32)
 ```
 
-figwig's tests check it against pybigtools' `values()` bit for bit, except
-that pybigtools sums overlapping intervals where figwig raises. A missing file
-or a URL raises `FileNotFoundError`, which this does not catch.
+pybigtools sums overlapping intervals and panics on a bigBed with an
+exception that is not an `Exception`, so check the magic first where a path
+may be either. A missing file or a URL raises `FileNotFoundError`, which
+this does not catch.

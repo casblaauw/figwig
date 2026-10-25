@@ -1,99 +1,87 @@
 ---
 name: figwig
 description: >-
-  Read and write bigWig files fast with figwig. Use it to read per-base
-  signal under many genomic windows, such as peaks, training regions or a
-  model's inputs, from one bigWig or several into a float32 numpy array on
-  several threads. Use it to write bigWigs from numpy arrays, model
-  predictions, intervals or per-base counts, and to convert BAM, SAM,
-  BED or fragment files to bigWig coverage tracks with `figwig bam2bw`.
-  Use its own figwig file (.fw) to hold many tracks in one file with
-  attributes per track, read in windows from any subset of them as
-  integers, and convert bigWigs or reads to and from it with `figwig
-  bw2fw`, `fw2bw` and `bam2fw`. It fires whenever code reads values from
-  or creates a .bw/.bigWig/.fw file, replaces pyBigWig, pybigtools or
-  pybbi loops, builds a data loader over bigWig or figwig tracks, or turns
-  reads into 5'-end count tracks. This file is a router: read the matching
-  reference file before writing code.
+  Read and write bigWig files fast with figwig, and its own figwig file
+  (.fw) that holds many tracks in one file. Use it to read per-base signal
+  under many genomic windows (peaks, training regions, a model's inputs)
+  from one bigWig or several into a numpy array on threads; to write
+  bigWigs from numpy arrays, model predictions, intervals or per-base
+  counts; to convert BAM, SAM, BED or fragment files to count tracks with
+  `figwig bam2bw` or `bam2fw`; and to build a figwig file of many tracks,
+  cells or reads with attributes per track, read in windows from any subset
+  of them, summed per label, per bin or over intervals, or straight onto a
+  GPU. It fires whenever code reads values from or creates a
+  .bw/.bigWig/.fw file, replaces pyBigWig, pybigtools, pybbi or deepTools
+  loops, builds a data loader over genomic tracks, or turns reads into
+  count tracks. This file is a router: read the matching reference file
+  before writing code.
 ---
 
 # figwig
 
-figwig reads and writes bigWig files into and out of numpy. Its threads run
-in parallel, because zlib, libdeflate and its numba kernels run without the
-GIL. It depends only on numpy and numba.
-
-```python
-from figwig import BigWigReader
-from figwig import read_bigwig
-from figwig import BigWigWriter
-from figwig import write_bigwig
-from figwig import FigWigReader
-from figwig import read_figwig
-from figwig import FigWigWriter
-from figwig import write_figwig
-```
+A multithreaded bigWig reader and writer, into and out of numpy, and the
+figwig file (`.fw`): many tracks in one file, a JSON record per track.
+Depends on numpy and numba only; docs at <https://figwig.readthedocs.io>.
+Public API: `BigWigReader`/`read_bigwig`, `BigWigWriter`/`write_bigwig`,
+`FigWigReader`/`read_figwig`, `FigWigWriter`/`write_figwig`; commands
+`figwig bam2bw`, `bam2fw`, `bw2fw`, `fw2bw`, `reorder`, `merge`, `info`.
+Read signatures from the code; the files here hold what the code does not
+say.
 
 ## When it is the wrong tool
 
 | Need | Use instead |
 |---|---|
 | a bigBed or a big-endian bigWig | pybigtools or pyBigWig; figwig raises `ValueError` |
-| a bigWig at a URL | download it first, or use pyBigWig; figwig takes a URL for a path and raises `FileNotFoundError` |
-| summaries from zoom levels, such as a whole-chromosome mean or `stats()` | pyBigWig or pybigtools; figwig reads every base and ignores zoom levels |
+| a bigWig at a URL | download it first; figwig takes a URL for a path and raises `FileNotFoundError` |
+| a bigWig's zoom-level summaries (`stats()`, a whole-chromosome mean) | pyBigWig or pybigtools; figwig reads every base. A figwig file's `tile_sums` serves this |
 | a bigWig whose intervals overlap | pybigtools, which sums them; figwig raises |
+| a genome browser track from a figwig file | `figwig fw2bw -z 10`; browsers do not read `.fw` |
 
 ## Conventions that hold everywhere
 
-- Coordinates are 0-based and half-open, as in BED. Window `j` is
-  `[starts[j], starts[j] + width)` on `chroms[j]`, and its values go to row `j`
-  whatever order the windows are given in.
-- Reads return float32 arrays. One file gives `(n, width)`. A list of files
-  gives `(n, len(files), width)`, which is `(batch, channels, length)`.
-- `missing=0.0` by default: a base no interval covers reads as 0, where
-  pyBigWig gives NaN. A base past the end of its chromosome is always NaN.
-- A write leaves out every base whose value is `missing` or NaN, so reading
-  with the same `missing` gives the values back.
-- `n_jobs=8` by default on every reader and writer call. `-1` uses every CPU
-  this process may run on. `figwig bam2bw -p` defaults to 1 core.
-- A file figwig cannot read exactly raises `ValueError`. Catch it to fall
-  back to another reader.
+- Coordinates are 0-based, half-open. Window `j` is `[starts[j], starts[j] + width)`
+  on `chroms[j]` and lands in row `j`, whatever order the windows are given in.
+  Windows may overlap and repeat; `starts` must be integers, at least 0.
+- A bigWig read is float32, `(n, width)` for one file and `(n, files, width)`
+  for a list, even of one. A figwig read is `(n, tracks, width)` in the
+  tracks' own dtype.
+- bigWigs have `missing` (0.0 by default; pyBigWig gives NaN): a base no
+  interval covers reads as it, and a write leaves out bases whose value is
+  it or NaN. A figwig file has no `missing`: a base never written is 0.
+- A base past the end of its chromosome is NaN in a float output.
+- `n_jobs=8` by default on every reader and writer, `-1` for every CPU;
+  `-p` on the commands defaults to 1.
+- Anything figwig cannot read exactly raises `ValueError` with the cause.
 
 ## Install
 
-`pip install "figwig[fast]"`, or `uv add "figwig[fast]"`. The `fast` extra
-adds libdeflate, which compresses several times faster than zlib.
-`figwig bam2bw` needs the `bam2bw` extra (`pip install "figwig[bam2bw]"`),
-which adds pysam, pyfaidx, biopython, tqdm, isal and deflate, and runs on
-Linux and macOS only, since pysam does not support Windows. Python 3.10 or
-later.
+`pip install "figwig[fast]"` (libdeflate: faster writes, faster `.fw` reads);
+`"figwig[bam2bw]"` for `figwig bam2bw`/`bam2fw` (Linux and macOS);
+`"figwig[cuda]"` for `device="cuda"` (cupy for CUDA 12; `cupy-cuda13x` or
+`cupy-cuda11x` otherwise). Python 3.10+.
 
 ## Task → reference
 
 | The task is… | Read |
 |---|---|
-| reading windows from one bigWig or several: shapes, `missing`, chromosome names, reusing a reader | `references/reading.md` |
-| a PyTorch Dataset or DataLoader over bigWig tracks | `references/reading.md`, then `references/threads-and-memory.md` |
-| writing model predictions, intervals or per-base counts to a bigWig | `references/writing.md` |
-| writing a genome-wide track a batch at a time | `references/writing.md` |
-| choosing `n_jobs` or `-p`, the expected gain from threads, memory, the first call's compile time | `references/threads-and-memory.md` |
-| converting BAM, SAM, BED or fragment files to bigWig | `references/bam2bw.md` |
-| a figwig file (`.fw`): many tracks in one file, read in windows by attribute; `FigWigReader`, `FigWigWriter`, `read_figwig`, `write_figwig` | `references/figwig-files.md` |
-| single-cell cut sites or any thousands of sparse tracks: `write_sparse`, `sparse=True`, `labels=` pseudobulks, `order='tracks'` vs `'positions'`, `figwig reorder` | `references/figwig-files.md` |
-| adding tracks to a figwig file (`append=True`, `add_file`, `figwig merge`, `bw2fw --append`), tile sums in place of zoom levels (`tile_sums`), checking a file (`verify=True`) | `references/figwig-files.md` |
-| converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
-| reading a figwig file straight onto a GPU, for PyTorch, JAX or TensorFlow (`device="cuda"`, DLPack, pinned `out=`) | `references/figwig-files.md` |
+| read windows from one bigWig or several; reuse readers; a Dataset or DataLoader over bigWigs | `references/reading.md` |
+| write model predictions, intervals or per-base counts to bigWigs; a genome-wide track a batch at a time; files identical to pyBigWig's | `references/writing.md` |
+| BAM, SAM, BED or fragment files → bigWig count tracks | `references/bam2bw.md` |
+| bigWigs ↔ figwig file (`bw2fw`, `fw2bw`), reads → figwig tracks (`bam2fw`), `reorder`, `merge`, `info`, the metadata table, `--missing nan` | `references/converters.md` |
+| read a figwig file: tracks by attribute, dtype, `sparse=`, `labels=` pseudobulks, `bins=`, `sums` over peaks or genes, `tile_sums`, zoom levels, reads or cells as `channels=`/`items=`, GPU output, DataLoader | `references/figwig-reading.md` |
+| write a figwig file: tracks and dtypes, tile, groups and order, `write_sparse` for cells or reads, `append=True`, `add_file`, `verify=True` | `references/figwig-writing.md` |
+| a whole job: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip, Fiber-seq reads as tracks | `references/recipes.md` |
+| choose `n_jobs` or `-p`, estimate memory, the first call's compile time, measure on the target machine | `references/threads-and-memory.md` |
 
 ## Symptom → reference
 
 | You see… | Read |
 |---|---|
-| any `ValueError`, `TypeError` or `UserWarning` raised by figwig's bigWig reader, writer or `bam2bw` | `references/errors.md` |
-| any error from a figwig file (`.fw`): its `FigWigReader`, `FigWigWriter` or converters | the Errors table of `references/figwig-files.md` |
-| a bigWig written by figwig that no reader opens ("is not a bigWig file") | `references/errors.md` |
-| values that are 0 where you expected NaN, or the reverse | `references/reading.md` |
-| `figwig bam2bw` running on one core, or a minus-strand bigWig that is empty | `references/bam2bw.md` |
-| threads that do not make a read faster | `references/threads-and-memory.md` |
-| `tracks must make up whole groups`, or a figwig read decoding more tracks than asked for | `references/figwig-files.md` |
-
-The full documentation is at <https://figwig.readthedocs.io>.
+| any `ValueError`, `TypeError` or `UserWarning` from figwig, or a command's message | `references/errors.md` |
+| "is not a bigWig file" on a file figwig wrote | `references/errors.md`: it was never closed |
+| 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
+| `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |
+| threads not making a read faster; a first call that takes 30 s | `references/threads-and-memory.md` |
+| a figwig read slower than expected, or decoding more tracks than asked | `references/figwig-writing.md`: tile, groups and order |
+| "has been replaced or rewritten since this reader opened it" | `references/errors.md`: open the reader again |
