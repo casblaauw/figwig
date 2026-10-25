@@ -884,6 +884,12 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	matrix, never densely. The chunks, `bounds`, `kinds` and `stats` are as
 	in `_encode_tiles`. Encoding stops before a tile whose chunk might not
 	fit the rest of `out`; returns the number of tiles encoded.
+
+	Only the tracks a tile touches are visited per tile: their statistics
+	are reset after the tile and folded into `stats`, where a group of
+	thousands of tracks, as cells are, would otherwise pay for every track
+	on every tile. A track a folded tile does not touch has the tile's
+	zeros folded in once, at the end, as its minimum and maximum of 0.
 	"""
 
 	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
@@ -892,6 +898,9 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
 	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
 	flags = numpy.zeros(n_tracks, dtype=numpy.int64)
+	touched = numpy.empty(n_tracks, dtype=numpy.int64)
+	folded = numpy.zeros(n_tracks, dtype=numpy.int64)
+	n_folded = 0
 	most = 0
 	for t in range(tiles.shape[0]):
 		most = max(most, first[t + 1] - first[t])
@@ -905,33 +914,31 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		n = e1 - e0
 		need = max(4 + 4 * n_tracks + 3 * n + 8 * n + 16, 24 + 18 * n + 16)
 		if position + need > out.shape[0]:
+			_fold_absent(stats, folded, n_folded)
 			return t
-		for g in range(n_tracks):
-			nnz[g] = 0
-			nans[g] = 0
-			mins[g] = 0.0
-			maxs[g] = 0.0
-			sums[g] = 0.0
-			flags[g] = 0
 
 		# The entries of each track, in order, with their statistics and
 		# the bytes of their offsets.
 		total = 0
 		delta_bytes = 0
 		n_present = 0
+		n_touched = 0
 		last_track = -1
 		last = 0
 		for e in range(e0, e1):
 			g = tracks[e]
+			if g != last_track:
+				touched[n_touched] = g
+				n_touched += 1
+				last_track = g
+				last = 0
 			v = values[e]
 			if _overflows(v, classes[g]):
 				flags[g] |= _FLAG_OVERFLOW
 			v = _as_stored(v, classes[g])
 			if v == 0.0:
 				continue
-			if g != last_track:
-				last_track = g
-				last = 0
+			if nnz[g] == 0:
 				n_present += 1
 			p = positions[e] - base
 			offs[total] = p
@@ -951,28 +958,164 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			delta_bytes += _varint_bytes(p - last)
 			last = p
 
-		for g in range(n_tracks):
+		for k in range(n_touched):
+			g = touched[k]
 			tile_sums[t, g] = numpy.float32(sums[g])
 		if total == 0:
 			kinds[t] = _ZERO
 			bounds[t + 1] = position
+			for k in range(n_touched):
+				g = touched[k]
+				nnz[g] = 0
+				nans[g] = 0
+				mins[g] = 0.0
+				maxs[g] = 0.0
+				sums[g] = 0.0
+				flags[g] = 0
 			continue
 
-		for g in range(n_tracks):
+		for k in range(n_touched):
+			g = touched[k]
 			if mins[g] < -2147483648.0 or maxs[g] >= 4294967296.0:
 				flags[g] |= _FLAG_WIDE
-		code, total = _chunk_code(n_tracks, classes, nnz, mins, maxs, sums, flags)
+		code, total = _chunk_code_of(touched, n_touched, classes, nnz, mins,
+			maxs, sums, flags)
 		w = _WIDTHS[code]
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, tile,
 			0, 0, False, allow_matrix, False, compressed)
 		kinds[t] = kind | (code << _CODE_SHIFT)
-		end = _write_entries(out, position, kind, code, n_tracks, nnz, offs,
-			vals)
+		end = _write_entries_of(out, position, kind, code, n_tracks, touched,
+			n_touched, n_present, total, nnz, offs, vals)
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
-		_fold_stats(stats, nnz, mins, maxs, sums, flags, nans)
+		n_folded += 1
+		for k in range(n_touched):
+			g = touched[k]
+			_fold_track(stats, g, nnz[g], mins[g], maxs[g], sums[g], flags[g],
+				nans[g])
+			folded[g] += 1
+			nnz[g] = 0
+			nans[g] = 0
+			mins[g] = 0.0
+			maxs[g] = 0.0
+			sums[g] = 0.0
+			flags[g] = 0
 
+	_fold_absent(stats, folded, n_folded)
 	return tiles.shape[0]
+
+
+@numba.njit(nogil=True, cache=True, inline='always')
+def _fold_track(stats, g, nnz, mn, mx, sm, fl, nan):
+	"""Fold one track's statistics over a tile into `stats`, as
+	`_fold_stats` does for every track."""
+
+	if stats.shape[1] > 5:
+		total = stats[g, 0]
+		t = total + sm
+		if abs(total) >= abs(sm):
+			stats[g, 5] += (total - t) + sm
+		else:
+			stats[g, 5] += (sm - t) + total
+		stats[g, 0] = t
+	else:
+		stats[g, 0] += sm
+	stats[g, 1] += nnz - nan
+	if mn < stats[g, 2]:
+		stats[g, 2] = mn
+	if mx > stats[g, 3]:
+		stats[g, 3] = mx
+	stats[g, 4] = numpy.float64(numpy.int64(stats[g, 4]) | fl)
+
+
+@numba.njit(nogil=True, cache=True)
+def _fold_absent(stats, folded, n_folded):
+	"""Fold the zeros of the tiles a track was absent from: a minimum and
+	maximum of 0, which `_fold_stats` gives every untouched track on every
+	tile."""
+
+	for g in range(stats.shape[0]):
+		if folded[g] < n_folded:
+			if 0.0 < stats[g, 2]:
+				stats[g, 2] = 0.0
+			if 0.0 > stats[g, 3]:
+				stats[g, 3] = 0.0
+
+
+@numba.njit(nogil=True, cache=True)
+def _chunk_code_of(touched, n_touched, classes, nnz, mins, maxs, sums, flags):
+	"""`_chunk_code` over the tracks a tile touches, the others
+	contributing nothing."""
+
+	integral = True
+	wide = False
+	total = 0
+	low, high, sum_ = 0.0, 0.0, 0.0
+	for k in range(n_touched):
+		g = touched[k]
+		total += nnz[g]
+		if flags[g] & (_FLAG_FRACTION | _FLAG_WIDE):
+			integral = False
+		if nnz[g] > 0:
+			cls = classes[g]
+			if cls == _FLOAT64 or (cls == _INTEGER and not flags[g] &
+					_FLAG_FRACTION and (maxs[g] > _EXACT or mins[g] < -_EXACT)):
+				wide = True
+		if mins[g] < low:
+			low = mins[g]
+		if maxs[g] > high:
+			high = maxs[g]
+		sum_ += sums[g]
+	return _code_of(integral, low, high, total, sum_, wide), total
+
+
+@numba.njit(nogil=True, cache=True)
+def _write_entries_of(out, position, kind, code, n_tracks, touched, n_touched,
+	n_present, total, nnz, offs, vals):
+	"""`_write_entries` visiting only the tracks a tile touches, in track
+	order, which is the order of `touched`."""
+
+	if kind == _SPARSE or kind == _RUNS:
+		out[position:position + 4].view(numpy.uint32)[0] = total
+		lengths = out[position + 4:position + 4 + 4 * n_tracks].view(
+			numpy.uint32)
+		lengths[:] = 0
+		at = position + 4 + 4 * n_tracks
+		d = 0
+		for k in range(n_touched):
+			g = touched[k]
+			begin = at
+			last = 0
+			for i in range(nnz[g]):
+				at = _put_varint(out, at, offs[d] - last)
+				last = offs[d]
+				d += 1
+			lengths[g] = at - begin
+	else:
+		out[position:position + 4].view(numpy.uint32)[0] = n_present
+		tracks = out[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
+		ptr = out[position + 4 + 4 * n_present:position + 8 + 8 * n_present].view(
+			numpy.uint32)
+		k = 0
+		running = 0
+		for j in range(n_touched):
+			g = touched[j]
+			if nnz[g] > 0:
+				tracks[k] = g
+				ptr[k] = running
+				running += nnz[g]
+				k += 1
+		ptr[n_present] = running
+		at = position + 8 + 8 * n_present
+		offsets = out[at:at + 2 * total].view(numpy.uint16)
+		for d in range(total):
+			offsets[d] = numpy.uint16(offs[d])
+		at += 2 * total
+
+	values_at = _pad4(at)
+	for p in range(at, values_at):
+		out[p] = 0
+	return _store_values(out, values_at, code, vals, 0, total)
 
 
 @numba.njit(nogil=True, cache=True)
