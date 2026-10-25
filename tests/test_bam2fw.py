@@ -868,3 +868,159 @@ def test_coverage_counts_aligned_blocks(tmp_path, sizes):
 			"-ps", "40")):
 		values = bigwig_values(bigwig, "chr1", 1000)
 		assert values.min() >= 0 and values[440:470].sum() == 0
+
+
+# --coverage, the edges: the run decoder itself, inputs the other paths
+# take, batches, clipping at both ends, several files, the options.
+
+def test_coverage_runs_from_events():
+	"""Overlapping reads, coverage that returns to 0 in the middle, runs
+	clipped at both ends of the chromosome, a read wholly outside it, and
+	the number of bases clipped away, straight from the counted events."""
+
+	from figwig.bam2bw import _coverage_runs
+	from figwig.bam2bw import _read_count
+
+	def events(spans):
+		keys = []
+		for start, end in spans:
+			keys += [2 * start, 2 * end + 1]
+		positions, counts = numpy.unique(numpy.array(keys), return_counts=True)
+		return positions, counts
+
+	positions, counts = events([(10, 20), (15, 25), (15, 25), (40, 50)])
+	starts, ends, values, lost = _coverage_runs(positions, counts, 100)
+	assert starts.tolist() == [10, 15, 20, 40]
+	assert ends.tolist() == [15, 20, 25, 50]
+	assert values.tolist() == [1, 3, 2, 1] and lost == 0
+
+	positions, counts = events([(-5, 5), (95, 105), (200, 210), (-20, -10)])
+	starts, ends, values, lost = _coverage_runs(positions, counts, 100)
+	assert starts.tolist() == [0, 95] and ends.tolist() == [5, 100]
+	assert values.tolist() == [1, 1]
+	assert lost == 5 + 5 + 10 + 10
+	assert _read_count(positions, counts, 100) == 1
+
+	empty = numpy.empty(0, dtype=numpy.int64)
+	assert _coverage_runs(empty, empty, 100)[3] == 0
+	assert len(_coverage_runs(empty, empty, 100)[0]) == 0
+
+
+def test_coverage_of_bgzf_and_gzip_beds_and_of_several_files(tmp_path,
+		coverage_bed, coverage_bam, sizes):
+	import gzip
+	import pysam
+
+	expected = pileup(stranded=False)
+	bgzf = str(tmp_path / "coverage.bed.gz")
+	pysam.tabix_compress(coverage_bed, bgzf)
+	plain = str(tmp_path / "plain.bed.gz")
+	with open(coverage_bed, "rb") as src, gzip.open(plain, "wb") as dst:
+		dst.write(src.read())
+	for name, path, flags in [("bgzf", bgzf, ("-p", "3")), ("plain", plain, ("-p",
+			"3")), ("bgzf1", bgzf, ())]:
+		assert_coverage(bam2bw(tmp_path / name, path, sizes, "-c", "-u", *flags),
+			expected, ["+"])
+
+	# Several inputs are pooled by bam2bw and kept apart by bam2fw.
+	bigwigs = bam2bw(tmp_path / "pooled", coverage_bam, sizes, "-c")
+	two = bam2bw(tmp_path / "two", coverage_bam, sizes, "-c")
+	doubled = {chrom: {s: 2 * v for s, v in strands.items()} for chrom, strands
+		in pileup().items()}
+	main(["bam2bw", coverage_bam, coverage_bam, "-s", sizes, "-n", str(tmp_path /
+		"two" / "both"), "-c"])
+	assert_coverage([str(tmp_path / "two" / "both.+.bw"), str(tmp_path / "two" /
+		"both.-.bw")], doubled, ["+", "-"])
+	table = tmp_path / "files.tsv"
+	table.write_text("file\tname\tassay\ncoverage.bam\tA\tChIP-seq\ncoverage.bed\t\t"
+		"ATAC-seq\n")
+	path = bam2fw(tmp_path / "fw", [coverage_bam, coverage_bed], sizes, "-c",
+		"-m", str(table), "--dtype", "uint16", "-z", "1", "-t", "256")
+	reader = FigWigReader(path)
+	assert [track["name"] for track in reader.tracks] == ["A.+", "A.-",
+		"coverage.+", "coverage.-"]
+	assert [track["group"] for track in reader.tracks] == [0, 1, 2, 3]
+	assert reader.tracks[0]["assay"] == "ChIP-seq"
+	assert [track["dtype"] for track in reader.tracks] == ["uint16"] * 4
+	assert reader.zooms == (4,)
+	assert_tracks_match_bigwigs(path, ["A.+", "A.-"], bigwigs)
+	assert_tracks_match_bigwigs(path, ["coverage.+"], bam2bw(tmp_path / "bed",
+		coverage_bed, sizes, "-c", "-u"))
+	del two
+
+
+def test_coverage_shifts_clip_and_skip(tmp_path, coverage_bam, sizes, capsys):
+	"""A shift that pushes a read before 0 is clipped there and reported; a
+	read it empties is skipped; and the depth counts the reads whose first
+	base lies inside the chromosome, from the kernel and the pysam loop."""
+
+	import pysam
+
+	sam = str(tmp_path / "coverage.sam")
+	pysam.view("-h", "-o", sam, coverage_bam, catch_stdout=False)
+	expected = pileup(-150, 0)
+	for name, source in (("bam", coverage_bam), ("sam", sam)):
+		bigwigs = bam2bw(tmp_path / name, source, sizes, "-c", "-ps", "-150")
+		assert_coverage(bigwigs, expected, ["+", "-"])
+		out = capsys.readouterr().out
+		# chr1's reads at 100 (two) and 120 start 50 and 30 before 0, chr2's
+		# at 0 starts 150 before it, chr1:980 runs 10 past 1000 and chr2:490
+		# 10 past 500.
+		assert "entries fell outside" in out
+	# With -r the depth is the reads that start inside: chr1 at 980
+	# (shifted to 830) and chr2 at 490 (to 340); the others are shifted
+	# before 0, so 2 reads.
+	bigwigs = bam2bw(tmp_path / "r", coverage_bam, sizes, "-c", "-ps", "-150",
+		"-r")
+	assert_coverage(bigwigs, expected, ["+", "-"], scale=1 / 2)
+	# A shift past every read's end empties them all: no data at all.
+	bigwigs = bam2bw(tmp_path / "none", coverage_bam, sizes, "-c", "-ps", "2000")
+	for chrom, length in CHROM_SIZES:
+		for bigwig in bigwigs:
+			assert bigwig_values(bigwig, chrom, length).sum() == 0
+
+
+def test_coverage_through_small_write_batches(tmp_path, coverage_bam, sizes,
+		monkeypatch):
+	"""The runs are written in batches of _WRITE_ITEMS items that may end
+	inside a chromosome; batches of three items give the same file as one."""
+
+	import figwig.bam2bw
+
+	whole = bam2bw(tmp_path / "whole", coverage_bam, sizes, "-c")
+	monkeypatch.setattr(figwig.bam2bw, "_WRITE_ITEMS", 3)
+	small = bam2bw(tmp_path / "small", coverage_bam, sizes, "-c")
+	for a, b in zip(whole, small):
+		with open(a, "rb") as x, open(b, "rb") as y:
+			assert x.read() == y.read()
+
+
+def test_coverage_of_an_empty_input_and_a_zero_scale(tmp_path, sizes):
+	bam = str(write_bam(tmp_path / "empty.bam", BAM_CHROM_SIZES, [], unmapped=[(
+		"chr1", 5, 20)]))
+	bigwigs = bam2bw(tmp_path / "bw", bam, sizes, "-c")
+	for bigwig in bigwigs:
+		assert BigWigReader(bigwig)._data_index == 0
+	path = bam2fw(tmp_path / "fw", [bam], sizes, "-c")
+	reader = FigWigReader(path)
+	assert reader.stats["sum"].tolist() == [0, 0]
+	bed = str(write_intervals(tmp_path / "zero.bed", [("chr1", 10, 10), ("chr1",
+		20, 15), ("chr1", 30, 40)]))
+	bigwig, = bam2bw(tmp_path / "zero", bed, sizes, "-c", "-u")
+	values = bigwig_values(bigwig, "chr1", 1000)
+	assert values.sum() == 10 and values[30:40].min() == 1
+
+
+def test_coverage_command_line(tmp_path, coverage_bam, sizes):
+	name = str(tmp_path / "cli")
+	result = subprocess.run([sys.executable, "-m", "figwig", "bam2bw", coverage_bam,
+		"-s", sizes, "-n", name, "-c", "-u", "-v", "-z", "2", "-p", "2"], env=ENV,
+		capture_output=True, text=True, timeout=600)
+	assert result.returncode == 0, result.stderr
+	assert "20 entries fell outside" in result.stdout
+	assert_coverage([name + ".bw"], pileup(stranded=False), ["+"])
+	result = subprocess.run([sys.executable, "-m", "figwig", "bam2fw", coverage_bam,
+		"-s", sizes, "-n", name, "-c", "-v", "-p", "2"], env=ENV,
+		capture_output=True, text=True, timeout=600)
+	assert result.returncode == 0, result.stderr
+	assert len(FigWigReader(name + ".fw").tracks) == 2
