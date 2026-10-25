@@ -52,6 +52,11 @@ from typing import NamedTuple
 import numpy
 
 from ._figwig_kernels import _BLOCK_ENTRIES
+from ._figwig_kernels import _CRC_TABLES
+from ._figwig_kernels import _crcs_of
+from ._figwig_kernels import _entry_bounds
+from ._figwig_kernels import _fold_batch
+from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
 from ._figwig_kernels import _CODE_SHIFT
 from ._figwig_kernels import _F64
@@ -119,6 +124,7 @@ _BATCH_BYTES = 1 << 25
 _BATCH_CHUNKS = 256
 _MIN_BATCH_CHUNKS = 16
 _BATCHES_PER_THREAD = 8
+_ENTRIES_PER_BATCH = 1 << 20
 _CHUNKS_PER_THREAD = 64
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
@@ -397,8 +403,9 @@ def _infer_dtype(nonzero, low, high, flags):
 	return 'float64'
 
 
-def _positions(positions, name):
-	"""`positions` as a 1-D int64 array."""
+def _positions(positions, name, copy=True):
+	"""`positions` as a 1-D int64 array, the array itself when it is one
+	and `copy` is off."""
 
 	positions = numpy.asarray(positions)
 	if positions.ndim != 1:
@@ -408,7 +415,7 @@ def _positions(positions, name):
 		raise TypeError("{} must be integers, not {}.".format(name,
 			positions.dtype))
 
-	return positions.astype(numpy.int64)
+	return positions.astype(numpy.int64, copy=copy)
 
 
 def _track_indices(tracks, track_ids, n_tracks, whose):
@@ -823,6 +830,7 @@ class FigWigWriter:
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
 		self._copies = True
+		self._sorted_entries = False
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
 		self.zooms = _check_zooms(0 if zooms is None else zooms)
 		self._zoom_grids = [_zoom_grid(self._lengths, self.tile, 4 ** (k + 1))
@@ -1422,10 +1430,12 @@ class FigWigWriter:
 		if self._file is None:
 			raise ValueError("the writer is closed.")
 
-		positions = _positions(positions, 'positions')
+		positions = _positions(positions, 'positions', copy=not
+			self._sorted_entries)
 		n = len(positions)
 		values = numpy.asarray(values)
-		_check_exact(values)
+		if not self._sorted_entries:
+			_check_exact(values)
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 		if values.shape != (n,):
@@ -1446,7 +1456,7 @@ class FigWigWriter:
 				unique, inverse = numpy.unique(tracks, return_inverse=True)
 				track_ids = self._select(unique.tolist())[0][inverse]
 			elif tracks.dtype.kind in 'iu':
-				track_ids = tracks.astype(numpy.int64)
+				track_ids = tracks.astype(numpy.int64, copy=not self._sorted_entries)
 				if n > 0 and (track_ids.min() < 0 or track_ids.max() >= len(
 						self.tracks)):
 					raise ValueError("a track index is out of range; there are {} "
@@ -1455,15 +1465,31 @@ class FigWigWriter:
 				raise TypeError("tracks must be names or indices, not {}.".format(
 					tracks.dtype))
 
-		names, codes, tids = self._check_chroms(chroms, n)
+		# One chromosome throughout, the usual call, has its name resolved
+		# once and its entries checked against one length, with no array of
+		# codes or chromosome ids per entry.
+		single = isinstance(chroms, str)
+		names, codes, tids = self._check_chroms(chroms, 1 if single else n)
 		if n == 0:
 			return
+		if single:
+			codes = numpy.broadcast_to(codes, n)
+			tids = numpy.broadcast_to(tids, n)
 		present = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
-		present[track_ids] = True
+		if self._sorted_entries:
+			low, high = _entry_bounds(positions, track_ids, present)
+			low, high = int(low), int(high)
+		else:
+			present[track_ids] = True
+			low, high = int(positions.min()), int(positions.max())
 		ids = numpy.flatnonzero(present)
-
-		lengths = self._lengths[tids]
-		if positions.min() < 0 or (positions >= lengths).any():
+		if single:
+			outside = low < 0 or high >= self._lengths[tids[0]]
+		else:
+			lengths = self._lengths[tids]
+			outside = low < 0 or (positions >= lengths).any()
+		if outside:
+			lengths = self._lengths[tids]
 			j = int(numpy.argmax((positions < 0) | (positions >= lengths)))
 			raise ValueError("entry {} on {!r} is at {}, outside the chromosome."
 				.format(j, names[codes[j]], positions[j]))
@@ -1497,43 +1523,73 @@ class FigWigWriter:
 		# per entry where the chromosome and group are the same throughout,
 		# as in a call per chromosome, and of two otherwise; a lexsort of the
 		# five would take several times longer.
-		group_ids = self._group_of[track_ids]
-		order = self._entry_order(tids, group_ids, track_ids, positions)
-		tids, positions, track_ids, group_ids = tids[order], positions[order], \
-			track_ids[order], group_ids[order]
-		values = values[order].astype(numpy.float64)
-		same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
-			positions[1:] == positions[:-1])
-		if same.any():
-			k = int(numpy.argmax(same)) + 1
-			raise ValueError("entries {} and {} both name base {} of {!r} in "
-				"track {!r}.".format(int(order[k - 1]), int(order[k]),
-				positions[k], names[codes[int(order[k])]], self.tracks[int(
-				track_ids[k])]['name']))
+		# A caller whose entries already lie in that order, with no two on
+		# one base of one track and every value finite, as `figwig bam2fw
+		# --barcode-column` makes them, says so with `_sorted_entries` and is
+		# spared the sort, the gathers, the copies, the check for a repeated
+		# base and the pass over the values for infinity; on one
+		# chromosome and one group, the usual call, it is spared every pass
+		# over the entries but the checks of their range.
+		groups_present = numpy.unique(self._group_of[ids])
+		if self._sorted_entries and len(names) == 1 and len(groups_present) == 1:
+			order = None
+			group_ids = None
+			values = numpy.asarray(values, dtype=numpy.float64)
+			bounds = numpy.array([0, n], dtype=numpy.int64)
+		elif self._sorted_entries:
+			order = None
+			group_ids = self._group_of[track_ids]
+			values = numpy.asarray(values, dtype=numpy.float64)
+		else:
+			group_ids = self._group_of[track_ids]
+			order = self._entry_order(tids, group_ids, track_ids, positions)
+			tids, positions, track_ids, group_ids = tids[order], positions[order], \
+				track_ids[order], group_ids[order]
+			values = values[order].astype(numpy.float64)
+			same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
+				positions[1:] == positions[:-1])
+			if same.any():
+				k = int(numpy.argmax(same)) + 1
+				raise ValueError("entries {} and {} both name base {} of {!r} in "
+					"track {!r}.".format(int(order[k - 1]), int(order[k]),
+					positions[k], names[codes[int(order[k])]], self.tracks[int(
+					track_ids[k])]['name']))
+
+		def given(k):
+			return k if order is None else int(order[k])
 
 		def describe(j):
 			return "entry {} on {!r}".format(j, names[codes[j]])
 
 		# The entries of each (chromosome, group), checked against what the
 		# group wrote before, all of them before any is encoded.
-		bounds = numpy.concatenate([[0], numpy.flatnonzero((tids[1:] != tids[
-			:-1]) | (group_ids[1:] != group_ids[:-1])) + 1, [n]])
+		if group_ids is not None:
+			changes = group_ids[1:] != group_ids[:-1]
+			if len(names) > 1:
+				changes |= tids[1:] != tids[:-1]
+			bounds = numpy.concatenate([[0], numpy.flatnonzero(changes) + 1, [n]])
+
+		def group_at(a):
+			return int(groups_present[0]) if group_ids is None else int(
+				group_ids[a])
+
 		for a, b in zip(bounds[:-1], bounds[1:]):
-			low = int(positions[a:b].min())
-			high = int(positions[a:b].max())
-			self._check_order_of(int(group_ids[a]), tids[a:a + 1], numpy.array([
+			if len(bounds) > 2:
+				low = int(positions[a:b].min())
+				high = int(positions[a:b].max())
+			self._check_order_of(group_at(a), tids[a:a + 1], numpy.array([
 				low]), numpy.array([high + 1]), numpy.array([0, 1]), lambda j, c=a:
-				describe(int(order[c])), None, entries=self.order == 'positions')
+				describe(given(c)), None, entries=self.order == 'positions')
 
 		self._written = True
 		for a, b in zip(bounds[:-1], bounds[1:]):
-			g, tid = int(group_ids[a]), int(tids[a])
+			g, tid = group_at(a), int(tids[a])
 			if self.order == 'tracks':
 				self._write_track_entries(int(self._groups[g][0]), tid,
 					positions[a:b], values[a:b], int(positions[b - 1]) + 1)
 			else:
-				self._write_group_entries(g, tid, self._slot_of[track_ids[a:b]],
-					positions[a:b], values[a:b])
+				self._write_group_entries(g, tid, track_ids[a:b], positions[a:b],
+					values[a:b])
 
 		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
 			2 * self.n_jobs)))
@@ -1731,9 +1787,11 @@ class FigWigWriter:
 			self._done[g].add(last[0])
 		self._last[g] = (tid, end)
 
-	def _write_group_entries(self, g, tid, slots, positions, values):
+	def _write_group_entries(self, g, tid, track_ids, positions, values):
 		"""Encode one group's nonzero bases on one chromosome, sorted by
-		tile, track and position, into chunks on the pool."""
+		tile, track and position, into chunks on the pool. This thread only
+		finds where to cut the entries into batches of whole tiles; each
+		task finds its own tiles and its tracks' slots."""
 
 		tile = self.tile
 		n_tracks = len(self._groups[g])
@@ -1743,43 +1801,39 @@ class FigWigWriter:
 				False)
 			self._open[g] = None
 
-		tiles = positions // tile
-		slots = slots.astype(numpy.int64)
-		first = numpy.concatenate([[0], numpy.flatnonzero(tiles[1:] != tiles[
-			:-1]) + 1, [len(tiles)]])
-		unique = tiles[first[:-1]]
-
 		# Batches of tiles that hold about _BATCH_BYTES of entries, or fewer
-		# so that each thread gets several.
+		# so that each thread gets several, but not fewer than
+		# _ENTRIES_PER_BATCH, since each batch costs this thread its
+		# bookkeeping: with 32 threads and a few hundred thousand entries
+		# per batch, that bookkeeping was most of what this thread did.
 		per_batch = _BATCH_BYTES // 8
 		if self._pool is not None:
-			per_batch = max(_BLOCK_ENTRIES, min(per_batch, len(positions) // (
+			per_batch = max(_ENTRIES_PER_BATCH, min(per_batch, len(positions) // (
 				_BATCHES_PER_THREAD * self.n_jobs)))
-		a = 0
-		while a < len(unique):
-			b = a
-			total = 0
-			while b < len(unique) and (b == a or total < per_batch):
-				total += int(first[b + 1] - first[b])
-				b += 1
-			e0, e1 = int(first[a]), int(first[b])
-			task = (self._entries_task, g, tid, unique[a:b], first[a:b + 1] - e0,
-				slots[e0:e1], positions[e0:e1], values[e0:e1], n_tracks)
+		max_tiles = max(1, _BATCH_BYTES // (4 * n_tracks + 24))
+		cuts = _tile_cuts(positions, tile, per_batch, max_tiles)
+		for e0, e1 in zip(cuts[:-1].tolist(), cuts[1:].tolist()):
+			task = (self._entries_task, g, tid, track_ids[e0:e1], positions[e0:e1],
+				values[e0:e1], n_tracks)
 			if self._pool is None:
 				self._inflight.append((task[0](*task[1:]), g, None))
 			else:
 				self._inflight.append((self._pool.submit(*task), g, None))
-			a = b
 
-		self._sealed[g] = (tid, int(unique[-1]))
+		self._sealed[g] = (tid, int(positions[-1]) // tile)
 		self._note_written(g, tid, int(positions[-1]) + 1)
 
-	def _entries_task(self, g, tid, tiles, first, slots, positions, values,
-		n_tracks):
+	def _entries_task(self, g, tid, track_ids, positions, values, n_tracks):
 		"""Encode and compress one batch of tiles from their entries. The
 		encoder stops before a tile that might not fit its buffer, which
 		holds at most about _BATCH_BYTES, and is called again from there."""
 
+		slots = self._slot_of[track_ids]
+		all_tiles = positions // self.tile
+		first = numpy.concatenate([[0], numpy.flatnonzero(all_tiles[1:] !=
+			all_tiles[:-1]) + 1, [len(all_tiles)]])
+		tiles = all_tiles[first[:-1]]
+		del all_tiles
 		n = len(tiles)
 		n_entries = len(positions)
 		largest = int(numpy.diff(first).max())
@@ -2141,16 +2195,16 @@ class FigWigWriter:
 				result = result.result()
 			if len(result) == 8:
 				stats, summary = result[6], result[7]
-				rows = self._groups[g]
-				_fold_sums(self._stats, rows, stats[:, 0] + stats[:, 5])
-				self._stats[rows, 1] += stats[:, 1]
-				self._stats[rows, 2] = numpy.minimum(self._stats[rows, 2],
-					stats[:, 2])
-				self._stats[rows, 3] = numpy.maximum(self._stats[rows, 3],
-					stats[:, 3])
-				self._stats[rows, 4] = (self._stats[rows, 4].astype(numpy.int64) |
-					stats[:, 4].astype(numpy.int64)).astype(numpy.float64)
-				self._check_overflow(rows)
+				# One pass over the group's rows, where five fancy-indexed
+				# operations over thousands of tracks per batch were most of
+				# what this thread did per batch.
+				flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+					dtype=numpy.int64), numpy.ascontiguousarray(stats,
+					dtype=numpy.float64))
+				if flagged >= 0:
+					raise ValueError("a value of track {!r} lies beyond float32's "
+						"range; declare the track float64 to keep it.".format(
+						self.tracks[int(flagged)]['name']))
 				if summary is not None:
 					self._sums[g].append(summary)
 
@@ -2326,11 +2380,13 @@ def _moved(offsets, sizes, extents):
 
 
 def _crcs(data, cuts):
-	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]], as uint32."""
+	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]], as int64, in
+	one call without the GIL."""
 
-	view = memoryview(data)
-	return numpy.array([zlib.crc32(view[int(cuts[k]):int(cuts[k + 1])]) for k
-		in range(len(cuts) - 1)], dtype=numpy.int64)
+	out = numpy.empty(len(cuts) - 1, dtype=numpy.uint32)
+	_crcs_of(numpy.frombuffer(data, dtype=numpy.uint8), numpy.ascontiguousarray(
+		cuts, dtype=numpy.int64), _CRC_TABLES, out)
+	return out.astype(numpy.int64)
 
 
 def _gather_parts(parts):

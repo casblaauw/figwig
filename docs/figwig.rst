@@ -507,7 +507,10 @@ Writing nonzero bases, and the two orders
 
 ``write_sparse`` takes entries, one nonzero base each: a chromosome, a
 position, a track and a value, which is the form of fragment files, of a
-sparse matrix's triplets and of what ``read`` gives with ``sparse=True``.
+sparse matrix's triplets and of what ``read`` gives with ``sparse=True``
+(``figwig bam2fw --barcode-column 4 --cells cells.tsv -f`` writes the
+first file above from a fragments file, without this code;
+:doc:`converters`).
 The groups of the tracks named are written over the tiles the entries fall
 in, with every other base 0, and no two entries may name one base of one
 track. Entries come after a group's earlier items on a chromosome, and in
@@ -537,7 +540,8 @@ as the tracks of one figwig file, with a metadata table for their names
 and attributes, or adds them to a file with ``--append``; ``figwig fw2bw``
 writes a figwig file's tracks back as bigWigs, with that table; ``figwig
 bam2fw`` counts reads or fragments as ``figwig bam2bw`` does, one pair of
-tracks per input file; ``figwig reorder`` writes a figwig file in the
+tracks per input file, or one track per cell of a fragments file with
+``--barcode-column``; ``figwig reorder`` writes a figwig file in the
 other order; ``figwig merge`` writes the tracks of several files into one,
 copying their chunks; and ``figwig info`` prints what a file holds. A
 bigWig's values read from the figwig file as ``read_bigwig`` gives them

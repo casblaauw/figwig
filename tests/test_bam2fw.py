@@ -102,6 +102,7 @@ def bam2bw(tmp_path, filename, sizes, *flags):
 
 
 def bam2fw(tmp_path, filenames, sizes, *flags):
+	os.makedirs(tmp_path, exist_ok=True)
 	name = str(tmp_path / "out")
 	main(["bam2fw"] + list(filenames) + ["-s", sizes, "-n", name] + list(flags))
 	return name + ".fw"
@@ -234,3 +235,453 @@ def test_command_line(tmp_path, bam, sizes):
 		timeout=600)
 	assert result.returncode == 0, result.stderr
 	assert len(FigWigReader(name + ".fw").tracks) == 2
+
+
+# --barcode-column: a fragments file as one track per cell.
+
+FRAGMENTS = [
+	("chr1", 100, 150, "AAAC-1", 2),
+	("chr1", 100, 150, "AAAG-1", 1),
+	("chr1", 120, 160, "AAAC-1", 1),
+	("chr1", 200, 230, "CCCT-1", 1),
+	("chr2", 50, 75, "AAAG-1", 3),
+	("chr2", 60, 75, "AAAC-1", 1),
+	("chr2", 480, 510, "CCCT-1", 1),
+	("chrUN", 10, 20, "AAAC-1", 1),
+]
+BARCODES = ["AAAC-1", "AAAG-1", "CCCT-1"]
+
+
+@pytest.fixture(scope="session")
+def fragments(data_dir):
+	path = data_dir / "cells.tsv"
+	with open(path, "w") as handle:
+		handle.write("# id=test\n#\n")
+		for fields in FRAGMENTS:
+			handle.write("\t".join(map(str, fields)) + "\n")
+	return str(path)
+
+
+@pytest.fixture(scope="session")
+def fragments_gz(data_dir):
+	return str(write_intervals(data_dir / "cells.tsv.gz", FRAGMENTS))
+
+
+@pytest.fixture(scope="session")
+def per_cell_bigwigs(tmp_path_factory, data_dir, sizes):
+	"""`figwig bam2bw -f -u` on each barcode's fragments alone, per flag
+	set: the oracle for a track of the per-cell file."""
+
+	import functools
+
+	@functools.lru_cache(maxsize=None)
+	def bigwigs(flags):
+		out = tmp_path_factory.mktemp("percell")
+		paths = {}
+		for barcode in BARCODES:
+			path = write_intervals(out / (barcode + ".tsv"), [fields for fields in
+				FRAGMENTS if fields[3] == barcode])
+			paths[barcode] = bam2bw(out, str(path), sizes, "-u", *flags)[0]
+		return paths
+
+	return bigwigs
+
+
+@pytest.mark.parametrize("flags", [("-f",), (), ("-3p",), ("-f", "-ps", "4",
+	"-ns", "-5"), ("-f", "-sf", "0.5")])
+def test_barcode_column_counts_each_cell(tmp_path, fragments, sizes,
+		per_cell_bigwigs, flags):
+	path = bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", *flags)
+	reader = FigWigReader(path)
+	assert [track["name"] for track in reader.tracks] == BARCODES
+	assert [track["group"] for track in reader.tracks] == [0, 0, 0]
+	assert "strand" not in reader.tracks[0]
+	bigwigs = per_cell_bigwigs(flags)
+	for barcode in BARCODES:
+		assert_tracks_match_bigwigs(path, [barcode], [bigwigs[barcode]])
+
+
+def test_barcode_column_read_depth_is_the_files(tmp_path, fragments, sizes):
+	path = bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f")
+	scaled = bam2fw(tmp_path / "r", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-r")
+	counts, reader = FigWigReader(path), FigWigReader(scaled)
+	depth = counts.stats["sum"].sum()
+	for chrom, length in CHROM_SIZES:
+		expected = counts.read(chrom, [0], length, dtype="float64") / depth
+		numpy.testing.assert_allclose(reader.read(chrom, [0], length,
+			dtype="float64"), expected, rtol=1e-6)
+
+
+def test_cells_table_picks_names_and_attributes(tmp_path, fragments, sizes,
+		per_cell_bigwigs, capsys):
+	table = tmp_path / "cells.csv"
+	table.write_text("barcode,name,cell_type,dtype\n"
+		"CCCT-1,,B,\nAAAC-1,mono_1,CD14 Mono,uint16\nGGGG-1,,T,\n")
+	path = bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f",
+		"--cells", str(table), "-v")
+	reader = FigWigReader(path)
+	assert [track["name"] for track in reader.tracks] == ["CCCT-1", "mono_1",
+		"GGGG-1"]
+	assert [track["cell_type"] for track in reader.tracks] == ["B", "CD14 Mono",
+		"T"]
+	assert [track["dtype"] for track in reader.tracks] == ["uint8", "uint16",
+		"uint8"]
+	assert reader.stats["sum"][2] == 0
+	bigwigs = per_cell_bigwigs(("-f",))
+	assert_tracks_match_bigwigs(path, ["CCCT-1"], [bigwigs["CCCT-1"]])
+	assert_tracks_match_bigwigs(path, ["mono_1"], [bigwigs["AAAC-1"]])
+	out = capsys.readouterr().out
+	assert "2 fragments of {} have barcodes not in --cells".format(fragments) in out
+	assert "chrUN encountered in input but not in FASTA/chrom sizes." in out
+
+
+def test_groups_and_several_files(tmp_path, fragments, fragments_gz, sizes):
+	table = tmp_path / "files.tsv"
+	table.write_text("file\tname\tsample\ncells.tsv\tA\tpbmc\ncells.tsv.gz\t\t"
+		"pbmc2\n")
+	path = bam2fw(tmp_path, [fragments, fragments_gz], sizes, "--barcode-column",
+		"4", "-f", "--groups", "2", "-m", str(table))
+	reader = FigWigReader(path)
+	assert [track["name"] for track in reader.tracks] == ["A." + b for b in
+		BARCODES] + ["cells." + b for b in BARCODES]
+	assert [track["group"] for track in reader.tracks] == [0, 0, 1, 2, 2, 3]
+	assert [track["sample"] for track in reader.tracks] == ["pbmc"] * 3 + [
+		"pbmc2"] * 3
+	y = reader.read("chr1", [0], 1000, dtype="float32")
+	numpy.testing.assert_array_equal(y[0, :3], y[0, 3:])
+
+
+def test_threads_and_units_give_the_same_file(tmp_path, fragments, fragments_gz,
+		sizes, monkeypatch):
+	one = bam2fw(tmp_path / "one", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-p", "1")
+	# Units of 64 bytes of text, so that barcodes are found across units
+	# and numbered afterwards.
+	monkeypatch.setattr(figwig.bam2bw, "_IV_UNIT_BYTES", 64)
+	units = bam2fw(tmp_path / "units", [fragments], sizes, "--barcode-column",
+		"4", "-f", "-p", "3")
+	# A plain-gzip file is read as a stream whatever -p is.
+	stream = bam2fw(tmp_path / "gz", [fragments_gz], sizes, "--barcode-column",
+		"4", "-f", "-p", "3")
+	with open(one, "rb") as a, open(units, "rb") as b:
+		assert a.read() == b.read()
+	assert [t["name"] for t in FigWigReader(stream).tracks] == BARCODES
+	reader, other = FigWigReader(one), FigWigReader(stream)
+	numpy.testing.assert_array_equal(reader.stats["sum"], other.stats["sum"])
+
+
+def test_bgzf_units(tmp_path, fragments, sizes):
+	import pysam
+
+	bgzf = str(tmp_path / "cells.bed.gz")
+	pysam.tabix_compress(fragments, bgzf)
+	one = bam2fw(tmp_path / "one", [fragments], sizes, "--barcode-column", "4",
+		"-f")
+	path = bam2fw(tmp_path / "bgzf", [bgzf], sizes, "--barcode-column", "4", "-f",
+		"-p", "2")
+	reader, other = FigWigReader(one), FigWigReader(path)
+	numpy.testing.assert_array_equal(reader.stats["sum"], other.stats["sum"])
+	assert [t["name"] for t in other.tracks] == BARCODES
+
+
+def test_barcode_column_errors(tmp_path, fragments, bam, sizes):
+	with pytest.raises(SystemExit, match="column number from 4"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "2")
+	with pytest.raises(SystemExit, match="reads BED/tsv files of fragments"):
+		bam2fw(tmp_path, [bam], sizes, "--barcode-column", "4")
+	with pytest.raises(SystemExit, match="does not hold a chromosome, a start, "
+			"an end and a barcode in column 6"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "6")
+	table = tmp_path / "cells.tsv"
+	table.write_text("barcode\nAAAC-1\nAAAC-1\n")
+	with pytest.raises(SystemExit, match="lists a barcode more than once"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "--cells",
+			str(table))
+	elsewhere = tmp_path / "elsewhere.tsv"
+	elsewhere.write_text("chrZ\t1\t5\tAAAC-1\n")
+	with pytest.raises(SystemExit, match="no fragment of .* is on a chromosome "
+			"of .*; the file's chromosomes include 'chrZ'"):
+		bam2fw(tmp_path, [str(elsewhere)], sizes, "--barcode-column", "4")
+	table.write_text("barcode\nTTTT-1\n")
+	path = bam2fw(tmp_path / "listed", [fragments], sizes, "--barcode-column",
+		"4", "--cells", str(table))
+	assert FigWigReader(path).stats["sum"].tolist() == [0]
+	bad = tmp_path / "bad.tsv"
+	bad.write_text("chr1\t100\tx\tAAAC-1\n")
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		bam2fw(tmp_path, [str(bad)], sizes, "--barcode-column", "4")
+	bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-ps", "700",
+		"-f")
+
+
+def test_barcode_column_discards_and_reports(tmp_path, fragments, sizes, capsys):
+	path = bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f")
+	out = capsys.readouterr().out
+	assert "1 entries fell outside the provided chromosome sizes" in out
+	assert "chr2: 1" in out
+	reader = FigWigReader(path)
+	assert reader.read("chr2", [480], 20, tracks="CCCT-1")[0, 0] == 1
+
+
+def test_key_packing_with_many_chromosomes(tmp_path):
+	"""The key holds the chromosome above the cell above the position; 3,000
+	chromosomes take 12 bits of it, and the counts must still land on the
+	right chromosome, cell and base."""
+
+	chrom_sizes = [("c{}".format(k), 50_000) for k in range(3000)]
+	sizes = str(write_chrom_sizes(tmp_path / "many.chrom.sizes", chrom_sizes))
+	rng = numpy.random.default_rng(0)
+	rows = []
+	for _ in range(2000):
+		chrom = "c{}".format(rng.integers(3000))
+		start = int(rng.integers(49_000))
+		rows.append((chrom, start, start + 100, "B{}".format(rng.integers(50))))
+	path = write_intervals(tmp_path / "many.tsv", rows)
+	out = bam2fw(tmp_path, [str(path)], sizes, "--barcode-column", "4", "-f")
+	reader = FigWigReader(out)
+	names = [track["name"] for track in reader.tracks]
+	assert names == list(dict.fromkeys(barcode for *_, barcode in rows))
+	chosen = set(rng.choice(3000, 20, replace=False).tolist()) | {int(
+		rows[0][0][1:])}
+	expected = {k: numpy.zeros((50, 50_000), dtype=numpy.int64) for k in chosen}
+	totals = numpy.zeros(50, dtype=numpy.int64)
+	for chrom, start, end, barcode in rows:
+		totals[names.index(barcode)] += 2
+		if int(chrom[1:]) in chosen:
+			expected[int(chrom[1:])][names.index(barcode), [start, end - 1]] += 1
+	for k in chosen:
+		y = reader.read("c{}".format(k), [0], 50_000, dtype="int64")[0]
+		numpy.testing.assert_array_equal(y, expected[k])
+	numpy.testing.assert_array_equal(reader.stats["sum"], totals)
+
+
+def test_too_many_cells_for_the_key(tmp_path, fragments, sizes, monkeypatch):
+	"""With 3 chromosomes the key keeps 2 bits for them; 37 key bits leave 3
+	for the cell, so 8 cells."""
+
+	import figwig._cells
+
+	monkeypatch.setattr(figwig._cells, "_KEY_BITS", 37)
+	rows = [("chr1", 10 * k, 10 * k + 5, "B{}".format(k)) for k in range(9)]
+	path = str(write_intervals(tmp_path / "nine.tsv", rows))
+	with pytest.raises(SystemExit, match="holds more than 8 barcodes"):
+		bam2fw(tmp_path, [path], sizes, "--barcode-column", "4")
+	table = tmp_path / "cells.tsv"
+	table.write_text("barcode\n" + "".join("B{}\n".format(k) for k in range(9)))
+	with pytest.raises(SystemExit, match="--cells lists 9 barcodes, more than "
+			"the 8"):
+		bam2fw(tmp_path, [path], sizes, "--barcode-column", "4", "--cells",
+			str(table))
+	out = bam2fw(tmp_path, [str(write_intervals(tmp_path / "eight.tsv",
+		rows[:8]))], sizes, "--barcode-column", "4")
+	assert len(FigWigReader(out).tracks) == 8
+
+
+def test_malformed_fragments_files(tmp_path, sizes):
+	import pysam
+
+	def convert(name, text, *flags, binary=False):
+		path = tmp_path / name
+		if binary:
+			path.write_bytes(text)
+		else:
+			path.write_text(text)
+		return bam2fw(tmp_path / name.replace(".", "_"), [str(path)], sizes,
+			"--barcode-column", "4", "-f", *flags)
+
+	with pytest.raises(SystemExit, match="no fragment of .* was counted: the "
+			"file holds none"):
+		convert("empty.tsv", "")
+	with pytest.raises(SystemExit, match="the file holds none"):
+		convert("comments.tsv", "# id=x\n#\n\n")
+	out = convert("crlf.tsv", "chr1\t100\t150\tAAAC-1\t1\r\nchr1\t200\t250\t"
+		"AAAG-1\t2\r\n")
+	assert FigWigReader(out).stats["sum"].tolist() == [2, 2]
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		convert("utf8.tsv", b"chr1\t100\t150\tAAAC\xc3\xa9-1\t1\n", binary=True)
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		convert("huge.tsv", "chr1\t1000000000000000000\t150\tAAAC-1\t1\n")
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		convert("float.tsv", "chr1\t100.0\t150\tAAAC-1\t1\n")
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		convert("short.tsv", "chr1\t100\t150\n")
+	with pytest.raises(SystemExit, match="does not hold a chromosome"):
+		convert("bare_cr.tsv", "chr1\t100\t150\tAAAC-1\t1\rchr1\t200\t250\t"
+			"AAAC-1\t1\n")
+	out = convert("negative.tsv", "chr1\t-5\t3\tAAAC-1\t1\nchr1\t5\t3\tAAAC-1\t1\n")
+	assert FigWigReader(out).stats["sum"].tolist() == [3]
+
+	# A gzip file cut inside a member, plain or BGZF, and a BGZF file cut at
+	# a block boundary, which lacks the empty block that ends one.
+	lines = "".join("chr1\t{}\t{}\tB{}\t1\n".format(k, k + 50, k % 7) for k in
+		range(20_000))
+	(tmp_path / "whole.tsv").write_text(lines)
+	bgzf = str(tmp_path / "whole.tsv.gz")
+	pysam.tabix_compress(str(tmp_path / "whole.tsv"), bgzf)
+	with open(bgzf, "rb") as handle:
+		data = handle.read()
+	assert len(data) > 2 * 28
+	# Without its end block, a BGZF file is refused before it is read; the
+	# cut inside a member is what the gzip stream finds otherwise.
+	with pytest.raises(SystemExit, match="ends without the empty block that "
+			"ends a BGZF file, so it was cut short"):
+		convert("half.tsv.gz", data[:len(data) // 2], binary=True)
+	with pytest.raises(SystemExit, match="ends without the empty block"):
+		convert("blocks.tsv.gz", data[:-28], "-p", "2", binary=True)
+	with pytest.raises(SystemExit, match="is cut short, or is not a gzip file"):
+		convert("half_marked.tsv.gz", data[:len(data) // 2] + data[-28:],
+			binary=True)
+	with pytest.raises(SystemExit, match="is cut short, or is not a gzip file"):
+		convert("half_marked.tsv.gz", data[:len(data) // 2] + data[-28:], "-p",
+			"2", binary=True)
+	import gzip
+	plain = gzip.compress(lines.encode())
+	with pytest.raises(SystemExit, match="is cut short, or is not a gzip file"):
+		convert("plain.tsv.gz", plain[:len(plain) // 2], binary=True)
+	with pytest.raises(SystemExit, match="is cut short, or is not a gzip file"):
+		convert("garbage.tsv.gz", b"\x1f\x8b\x08\x00" + bytes(100), binary=True)
+
+
+def test_bgzf_blocks_as_units(tmp_path, sizes, monkeypatch):
+	"""A BGZF file of several blocks, scanned a block per unit, with lines
+	cut by block ends and barcodes found in every unit."""
+
+	import pysam
+
+	rng = numpy.random.default_rng(1)
+	rows = [("chr1", int(k), int(k) + 10, "B{}".format(rng.integers(40))) for k
+		in sorted(rng.integers(0, 990, 30_000))]
+	path = write_intervals(tmp_path / "blocks.tsv", rows)
+	bgzf = str(tmp_path / "blocks.tsv.gz")
+	pysam.tabix_compress(str(path), bgzf)
+	assert os.path.getsize(bgzf) > 3 * 65_536 // 4
+	one = bam2fw(tmp_path / "one", [str(path)], sizes, "--barcode-column", "4",
+		"-f")
+	monkeypatch.setattr(figwig.bam2bw, "_IV_UNIT_BLOCKS", 1)
+	units = bam2fw(tmp_path / "units", [bgzf], sizes, "--barcode-column", "4",
+		"-f", "-p", "3")
+	with open(one, "rb") as a, open(units, "rb") as b:
+		assert a.read() == b.read()
+	table = tmp_path / "cells.tsv"
+	table.write_text("barcode\n" + "".join("B{}\n".format(k) for k in
+		range(0, 40, 2)))
+	listed = bam2fw(tmp_path / "listed", [bgzf], sizes, "--barcode-column", "4",
+		"-f", "-p", "3", "--cells", str(table))
+	reader, other = FigWigReader(one), FigWigReader(listed)
+	names = [track["name"] for track in reader.tracks]
+	numpy.testing.assert_array_equal(other.stats["sum"], reader.stats["sum"][[
+		names.index("B{}".format(k)) for k in range(0, 40, 2)]])
+
+
+def test_barcode_column_other_options(tmp_path, fragments, sizes):
+	table = tmp_path / "cells.tsv"
+	table.write_text("barcode\tname\nAAAC-1\tx\nAAAG-1\tx\n")
+	with pytest.raises(SystemExit, match="x"):
+		bam2fw(tmp_path / "dup", [fragments], sizes, "--barcode-column", "4",
+			"--cells", str(table))
+	table.write_text("barcode\nCCCT-1\nAAAC-1\n")
+	path = bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f",
+		"-u", "-r", "--cells", str(table), "-z", "2", "-t", "256", "-l", "0",
+		"--dtype", "float32", "-g", "hg38")
+	reader = FigWigReader(path)
+	assert reader.tile == 256 and reader.genome == "hg38" and reader.zooms == (
+		4, 16)
+	assert [track["dtype"] for track in reader.tracks] == ["float32"] * 2
+	# -r divides by the depth of the cells kept: CCCT-1 and AAAC-1 together.
+	plain = FigWigReader(bam2fw(tmp_path / "plain", [fragments], sizes,
+		"--barcode-column", "4", "-f", "--cells", str(table)))
+	depth = plain.stats["sum"].sum()
+	numpy.testing.assert_allclose(reader.stats["sum"], plain.stats["sum"] / depth,
+		rtol=1e-6)
+	with pytest.raises(SystemExit, match="--mate_pairs only supports BAM/SAM"):
+		bam2fw(tmp_path / "mp", [fragments], sizes, "--barcode-column", "4", "-mp")
+
+
+def test_barcode_column_command_line(tmp_path, fragments, sizes):
+	name = str(tmp_path / "cli")
+	result = subprocess.run([sys.executable, "-m", "figwig", "bam2fw", fragments,
+		"-s", sizes, "-n", name, "-p", "2", "--barcode-column", "4", "-f", "-v"],
+		env=ENV, capture_output=True, text=True, timeout=600)
+	assert result.returncode == 0, result.stderr
+	assert [track["name"] for track in FigWigReader(name + ".fw").tracks] == \
+		BARCODES
+	assert "chrUN encountered in input but not in FASTA/chrom sizes." in \
+		result.stdout
+
+
+def test_default_groups_stay_within_a_chunk(tmp_path, sizes, monkeypatch):
+	"""Every cell of a file goes in one group unless a chunk could not hold
+	the group's values, tracks times tile; then the cells are cut into the
+	fewest groups that fit (64 values at a tile of 16: 4 cells each)."""
+
+	monkeypatch.setattr(figwig.bam2fw, "_CHUNK_VALUES", 64)
+	rows = [("chr1", 10 * k, 10 * k + 5, "B{}".format(k)) for k in range(10)]
+	path = str(write_intervals(tmp_path / "ten.tsv", rows))
+	out = bam2fw(tmp_path, [path], sizes, "--barcode-column", "4", "-t", "16")
+	assert [track["group"] for track in FigWigReader(out).tracks] == [0, 0, 0, 0,
+		1, 1, 1, 1, 2, 2]
+	out = bam2fw(tmp_path / "three", [path], sizes, "--barcode-column", "4",
+		"-t", "16", "--groups", "3")
+	assert [track["group"] for track in FigWigReader(out).tracks] == [0, 0, 0,
+		1, 1, 1, 2, 2, 2, 3]
+
+
+def test_entries_arrive_in_the_writers_order(tmp_path, sizes):
+	"""The scanner's keys sort into the order the writer encodes in, tile by
+	tile and cell by cell, so bam2fw hands them over presorted; the file must
+	be the one the same entries make through the sorting path, given in any
+	order, and a duplicate must still be named by the position given."""
+
+	from figwig import FigWigWriter
+
+	rng = numpy.random.default_rng(2)
+	rows = [("chr1", int(k), int(k) + 7, "B{}".format(rng.integers(30))) for k
+		in sorted(rng.integers(0, 990, 5000))]
+	rows += [("chr2", int(k), int(k) + 7, "B{}".format(rng.integers(30))) for k
+		in sorted(rng.integers(0, 490, 2000))]
+	path = str(write_intervals(tmp_path / "many.tsv", rows))
+	out = bam2fw(tmp_path, [path], sizes, "--barcode-column", "4", "-f", "-t",
+		"256")
+	reader = FigWigReader(out)
+	names = [track["name"] for track in reader.tracks]
+
+	entries = {}
+	for chrom, start, end, barcode in rows:
+		for position in (start, end - 1):
+			entries[(chrom, position, barcode)] = entries.get((chrom, position,
+				barcode), 0) + 1
+	keys = list(entries)
+	rng.shuffle(keys)
+	other = str(tmp_path / "shuffled.fw")
+	with FigWigWriter(other, CHROM_SIZES, names, tile=256, level=1,
+			groups=len(names)) as writer:
+		for chrom in ("chr1", "chr2"):
+			these = [key for key in keys if key[0] == chrom]
+			writer.write_sparse(chrom, [key[1] for key in these], [key[2] for
+				key in these], [entries[key] for key in these])
+	with open(out, "rb") as a, open(other, "rb") as b:
+		assert a.read() == b.read()
+
+	with FigWigWriter(str(tmp_path / "dup.fw"), CHROM_SIZES, ["a", "b"],
+			groups=2) as writer:
+		with pytest.raises(ValueError, match="entries 1 and 2 both name base 5"):
+			writer.write_sparse("chr1", [3, 5, 5], [0, 1, 1], [1, 1, 1])
+		writer._sorted_entries = True
+		with pytest.raises(ValueError, match="entry 2 on 'chr1' is at 2000, "
+				"outside the chromosome"):
+			writer.write_sparse("chr1", [3, 5, 2000], [0, 1, 1], [1, 1, 1])
+		writer.write_sparse("chr1", [3, 5], [0, 1], [1, 1])
+
+
+def test_infinite_scale_factor_is_refused(tmp_path, fragments, sizes):
+	"""The presorted hand-off promises finite values, so it is not used
+	when the scale factor is not finite, and the writer refuses as it would
+	any infinite value."""
+
+	with pytest.raises(SystemExit, match="values must be finite or NaN"):
+		bam2fw(tmp_path, [fragments], sizes, "--barcode-column", "4", "-f", "-sf",
+			"inf")
+	path = bam2fw(tmp_path / "zero", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-sf", "0")
+	assert FigWigReader(path).stats["sum"].tolist() == [0, 0, 0]

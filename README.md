@@ -37,6 +37,7 @@ integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
 | Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
 | A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
 | 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
+| Convert 257.6 million 10x fragments to 10,246 per-cell tracks | **9 s** at `-p 8`, **5.5 s** at `-p 32`, 18 GB peak | 140 s, 24 GB, a pandas recipe; 217 s, 8 GB, SnapATAC2 (fragments, not counts) |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
@@ -443,6 +444,7 @@ options:
 figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> k562.fw
 figwig fw2bw k562.fw -o bigwigs -p 8 --select assay=ATAC-seq                      # tracks -> bigwigs/<name>.bw
 figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8          # reads -> k562.fw
+figwig bam2fw fragments.tsv.gz -s hg38.chrom.sizes -n pbmc --barcode-column 4 --cells cells.tsv -f -p 8   # a track per cell
 figwig reorder k562.fw by_track.fw --order tracks                                # the other order
 figwig merge -o all.fw k562.fw hepg2.fw                                          # files -> one file
 figwig info k562.fw                                                              # what the file holds
@@ -453,7 +455,8 @@ their files or by a metadata table whose other columns become the tracks'
 attributes, or adds them to a file with `--append`; `figwig fw2bw` writes a
 figwig file's tracks back as bigWigs with such a table; `figwig bam2fw`
 takes `figwig bam2bw`'s arguments and writes each input file as its own pair
-of stranded tracks; `figwig reorder` rewrites a file in the other order;
+of stranded tracks, or a fragments file as one track per cell with
+`--barcode-column`; `figwig reorder` rewrites a file in the other order;
 `figwig merge` copies several files' tracks into one; and `figwig info`
 prints a file's tracks, attributes and statistics. The
 [converters](https://figwig.readthedocs.io/en/latest/converters.html) page

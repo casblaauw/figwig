@@ -39,16 +39,19 @@ machine allows (`references/threads-and-memory.md`).
 
 ## A single-cell file from a fragments file
 
-1. Count cut sites per (chromosome, position, cell): both fragment ends,
-   then sum duplicates (`numpy.unique` on the composite key, `bincount`).
-2. One track per cell with `dtype="uint8"` and the cell type as an
-   attribute; `FigWigWriter(path, chrom_sizes, tracks, groups=len(tracks),
-   level=0)`; `write_sparse` a chromosome at a time.
+1. A table of the called cells: barcode in the first column, cell type and
+   any other label as further columns (from `singlecell.csv`, a clustering,
+   or an annotation).
+2. `figwig bam2fw fragments.tsv.gz -s sizes -n pbmc --barcode-column 4
+   --cells cells.tsv -f -p 8` (`-l 0` for the fastest reads at twice the
+   size): one uint8 track per cell, the table's columns as attributes
+   (`references/converters.md`). From cut sites already in memory, the
+   same file is `FigWigWriter(path, chrom_sizes, tracks,
+   groups=len(tracks))` and `write_sparse` a chromosome at a time, with
+   duplicate (position, cell) entries summed first.
 3. Pseudobulks: `labels=` from the cell-type attribute. Per-cell windows:
    `sparse=True`, never dense. Peaks × cells: `sums`. Per-cell genome-wide
    slices: `figwig reorder --order tracks` and `read_entries`.
-4. Or skip step 1 and 2: `figwig bam2fw -f -u` gives one track per fragments
-   file, not per cell.
 
 ## Summaries over peaks, genes or cCREs
 
