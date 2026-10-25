@@ -6,6 +6,7 @@ figwig bw2fw -o k562.fw --append -p 8 h3k27ac.bw                                
 figwig bw2fw -o wgbs.fw --missing nan -p 8 methylation.bw                         # keep 0 apart from no data
 figwig fw2bw k562.fw -o bigwigs -p 8 [--select assay=ATAC-seq | -t atac.+ atac.-]  # tracks -> bigwigs/<name>.bw + k562.tsv
 figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam           # reads -> k562.fw, a pair of tracks per file
+figwig bam2fw -s hg38.chrom.sizes -n pbmc -f -p 8 --barcode-column 4 --cells cells.tsv fragments.tsv.gz   # a track per cell
 figwig reorder k562.fw by_track.fw --order tracks                                 # or positions, -t, --groups, -l
 figwig merge -o all.fw k562.fw hepg2.fw                                           # copy files' tracks into one
 figwig info k562.fw [-b]                                                          # genome, order, tile, chromosomes, size, a track table
@@ -68,6 +69,18 @@ file becomes its own pair of tracks `<name>.+` and `<name>.-` (one with
 the table's other columns are the tracks' attributes, plus `strand`. `-r`
 divides by each file's own depth. Counts are written as entries at level 1
 (`-l` otherwise). Needs the `bam2bw` extra; Linux and macOS.
+
+`--barcode-column 4` (the column, from 1; 4 in a Cell Ranger fragments
+file) writes a fragments file as one track per cell, named by its barcode,
+every cell of a file in one group (`--groups N` for smaller ones), no
+strand. `--cells cells.tsv` (tab-separated or `.csv`, a header, barcodes in
+the first column) keeps only those cells, in that order, with a `name`
+column as track name, `dtype` as dtype and every other column (a cell type)
+as an attribute; a raw 10x file holds hundreds of thousands of non-cell
+barcodes, so pass the called cells. Fragments of unlisted barcodes are left
+out (`-v` counts them). Use `-f` to count both ends, as for any fragments
+file. Memory is 8 bytes per fragment end during the scan. Several files
+give `<name>.<barcode>` tracks, a group per file.
 
 ## reorder and merge
 

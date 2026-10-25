@@ -126,6 +126,7 @@ figwig bam2fw
     figwig bam2fw -s hg38.chrom.sizes -n k562 -p 8 atac.bam dnase.bam
     figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -g hg38 -p 8 atac.bam dnase.bam
     figwig bam2fw -s hg38.chrom.sizes -n k562 -f -u -p 8 fragments.tsv.gz
+    figwig bam2fw -s hg38.chrom.sizes -n pbmc -f -p 8 --barcode-column 4 --cells cells.tsv fragments.tsv.gz
 
 ``figwig bam2fw`` takes what :doc:`figwig bam2bw <bam2bw>` takes, SAM/BAM
 files of reads or BED/tsv files of fragments and the same options for what
@@ -143,13 +144,36 @@ says otherwise. A file's tracks read from the figwig file exactly as the bigWigs
 ``figwig bam2bw`` writes from that file alone read with ``read_bigwig``. It
 needs the ``bam2bw`` extra and runs on Linux and macOS.
 
+``--barcode-column N`` writes a fragments file as one track per cell
+instead: column ``N`` (from 1; 4 in a Cell Ranger fragments file) holds
+the barcode, each barcode becomes a track named by it, in order of first
+appearance, every cell of a file goes in one group (``--groups`` for
+smaller ones), and there is one track per cell rather than a pair, since
+fragments have no strand. ``--cells`` gives a table, tab-separated or
+``.csv`` with a header, whose first column lists the barcodes to keep, in
+the order their tracks take: a ``name`` column names a cell's track,
+``dtype`` sets its dtype, every other column, such as a cell type, becomes
+an attribute of it, and fragments of barcodes not in the table are left
+out (``-v`` counts them). A Cell Ranger fragments file holds the
+fragments of every barcode, hundreds of thousands of which are not cells,
+so ``--cells`` with the called cells is the usual call. The file is read
+in BGZF units on the ``-p`` threads, as ``figwig bam2bw`` reads it, and
+each cell's fragment ends (``-f``, the usual choice; ``-ps`` and ``-ns``
+shift them) go in as entries, holding 8 bytes per end while the file is
+scanned. With several files each file's cells are its own group, named
+``<name>.<barcode>``, with the file's attributes from ``-m`` and the
+cell's from ``--cells``. :doc:`benchmarks` times the conversion against
+the other ways of making a per-cell file.
+
 .. code-block:: text
 
     usage: figwig bam2fw [-h] -s SIZES [-u] [-f | -3p] [-ps POS_SHIFT]
                          [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                          [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
-                         -n NAME [-m METADATA] [-g GENOME] [-t TILE]
-                         [--dtype DTYPE] [-z ZOOMS] [-l LEVEL] [--force] [-v]
+                         -n NAME [-m METADATA] [-g GENOME]
+                         [--barcode-column BARCODE_COLUMN] [--cells CELLS]
+                         [--groups GROUPS] [-t TILE] [--dtype DTYPE] [-z ZOOMS]
+                         [-l LEVEL] [--force] [-v]
                          filename [filename ...]
 
 figwig reorder

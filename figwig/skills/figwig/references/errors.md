@@ -44,6 +44,10 @@ writes nothing; writers stay usable.
 | `--mate_pairs only supports BAM/SAM input files.` | → drop `-mp` on BED/tsv |
 | the minus-strand bigWig is empty | BED/tsv has no strand → `-u` |
 | `X encountered in input but not in FASTA/chrom sizes.` (with `-v`) | expected for decoys and unplaced contigs; otherwise a naming mismatch or the wrong assembly |
+| `--barcode-column is a column number from 4`, `--barcode-column reads BED/tsv files of fragments, not X` | columns 1-3 are coordinates; a BAM has no barcode column |
+| `the line '...' does not hold a chromosome, a start, an end and a barcode in column N` | too few columns, or a coordinate that is not an integer; there is no per-line fallback in cell mode |
+| `no fragment of X is on a chromosome of SIZES; the file's chromosomes include ...` | `22` against `chr22`, or the wrong assembly |
+| `lists a barcode more than once`, `--cells lists N barcodes, more than the M ...`, `holds more than N barcodes, which is the most a file with M chromosomes can keep apart` | a duplicate row in `--cells`; too many cells for the key layout → give `--cells` the cells to keep, or fewer chromosomes in `-s` |
 
 ## figwig files
 
