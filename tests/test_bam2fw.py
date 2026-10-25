@@ -608,3 +608,20 @@ def test_barcode_column_command_line(tmp_path, fragments, sizes):
 		BARCODES
 	assert "chrUN encountered in input but not in FASTA/chrom sizes." in \
 		result.stdout
+
+
+def test_default_groups_stay_within_a_chunk(tmp_path, sizes, monkeypatch):
+	"""Every cell of a file goes in one group unless a chunk could not hold
+	the group's values, tracks times tile; then the cells are cut into the
+	fewest groups that fit (64 values at a tile of 16: 4 cells each)."""
+
+	monkeypatch.setattr(figwig.bam2fw, "_CHUNK_VALUES", 64)
+	rows = [("chr1", 10 * k, 10 * k + 5, "B{}".format(k)) for k in range(10)]
+	path = str(write_intervals(tmp_path / "ten.tsv", rows))
+	out = bam2fw(tmp_path, [path], sizes, "--barcode-column", "4", "-t", "16")
+	assert [track["group"] for track in FigWigReader(out).tracks] == [0, 0, 0, 0,
+		1, 1, 1, 1, 2, 2]
+	out = bam2fw(tmp_path / "three", [path], sizes, "--barcode-column", "4",
+		"-t", "16", "--groups", "3")
+	assert [track["group"] for track in FigWigReader(out).tracks] == [0, 0, 0,
+		1, 1, 1, 2, 2, 2, 3]

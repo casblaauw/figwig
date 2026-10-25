@@ -31,6 +31,10 @@ from .figwig import FigWigWriter
 
 _FRAGMENT_EXTENSIONS = ('.tsv', '.tsv.gz', '.bed', '.bed.gz')
 
+# The values a chunk of the figwig file holds at most, tracks times tile,
+# which FigWigWriter checks; a file's cells are grouped within it by default.
+_CHUNK_VALUES = 1 << 29
+
 _EXTENSIONS = ('.bam', '.sam', '.tsv.gz', '.tsv', '.bed.gz', '.bed')
 
 
@@ -66,7 +70,8 @@ def _parser(prog):
 		"the file, in order of first appearance.")
 	parser.add_argument('--groups', default=None, type=int, help="With "
 		"--barcode-column, the consecutive cells whose tiles are stored "
-		"together. Default is every cell of a file in one group.")
+		"together. Default is every cell of a file in one group, up to the "
+		"2**29 values a chunk holds, 32,768 cells at the default tile.")
 	parser.add_argument('-t', '--tile', default=_DEFAULT_TILE, type=int,
 		help="The bases per tile, a power of two from 16 to 65536. Default is "
 		"{}.".format(_DEFAULT_TILE))
@@ -198,7 +203,7 @@ def _check_cell_arguments(args):
 		if not filename.endswith(_FRAGMENT_EXTENSIONS):
 			raise ValueError("--barcode-column reads BED/tsv files of fragments, "
 				"not {}.".format(filename))
-	if args.cells is None and args.groups is not None and args.groups < 1:
+	if args.groups is not None and args.groups < 1:
 		raise ValueError("--groups must be at least 1.")
 
 
@@ -223,11 +228,15 @@ def _cell_table(path):
 
 
 def _tracks_for_cells(filenames, metadata, barcodes_per_file, cells, dtype,
-		groups):
+		groups, tile=_DEFAULT_TILE):
 	"""The track records of every file's cells, as (tracks, groups): one
 	track per barcode kept, named by the --cells table's name or the
 	barcode, with the file's name in front when there are several files,
-	carrying the cell's attributes and the file's."""
+	carrying the cell's attributes and the file's. Without `groups`, a
+	file's cells are one group, or as few as a chunk's values allow."""
+
+	if groups is None:
+		groups = max(_CHUNK_VALUES // tile, 1)
 
 	rows = [None] * len(filenames)
 	if metadata is not None:
@@ -260,9 +269,8 @@ def _tracks_for_cells(filenames, metadata, barcodes_per_file, cells, dtype,
 			tracks.append(track)
 			names.append(name)
 
-		size = len(names) if groups is None else groups
-		for k in range(0, len(names), max(size, 1)):
-			track_groups.append(names[k:k + size])
+		for k in range(0, len(names), groups):
+			track_groups.append(names[k:k + groups])
 
 	return tracks, track_groups
 
@@ -316,7 +324,7 @@ def _cells_main(args, prog, cores, chrom_sizes):
 
 	try:
 		tracks, groups = _tracks_for_cells(args.filename, args.metadata,
-			barcodes_per_file, cells, args.dtype, args.groups)
+			barcodes_per_file, cells, args.dtype, args.groups, args.tile)
 		if len(tracks) == 0:
 			raise ValueError(("no fragment of {} was counted: {}.").format(
 				", ".join(args.filename), "none has a barcode in --cells" if cells
@@ -345,7 +353,8 @@ def _cells_main(args, prog, cores, chrom_sizes):
 					values *= args.scale_factor
 					if read_depth is not None:
 						values /= read_depth
-					writer.write_sparse(chrom, positions, cell_ids + offset, values)
+					writer.write_sparse(chrom, positions, cell_ids.astype(numpy.int64) + offset,
+						values)
 				offset += len(barcodes)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)

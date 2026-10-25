@@ -72,15 +72,17 @@ divides by each file's own depth. Counts are written as entries at level 1
 
 `--barcode-column 4` (the column, from 1; 4 in a Cell Ranger fragments
 file) writes a fragments file as one track per cell, named by its barcode,
-every cell of a file in one group (`--groups N` for smaller ones), no
-strand. `--cells cells.tsv` (tab-separated or `.csv`, a header, barcodes in
+every cell of a file in one group, or the fewest groups a chunk's 2**29
+values allow (32,768 cells at the default tile; `--groups N` for smaller
+ones), no strand. `--cells cells.tsv` (tab-separated or `.csv`, a header, barcodes in
 the first column) keeps only those cells, in that order, with a `name`
 column as track name, `dtype` as dtype and every other column (a cell type)
 as an attribute; a raw 10x file holds hundreds of thousands of non-cell
 barcodes, so pass the called cells. Fragments of unlisted barcodes are left
 out (`-v` counts them). Use `-f` to count both ends, as for any fragments
-file. Memory is 8 bytes per fragment end during the scan. Several files
-give `<name>.<barcode>` tracks, a group per file.
+file. Memory is 8 bytes per fragment end during the scan and about three
+times that at the peak. Several files give `<name>.<barcode>` tracks, a
+group per file.
 
 ## reorder and merge
 

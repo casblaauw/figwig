@@ -147,9 +147,10 @@ needs the ``bam2bw`` extra and runs on Linux and macOS.
 ``--barcode-column N`` writes a fragments file as one track per cell
 instead: column ``N`` (from 1; 4 in a Cell Ranger fragments file) holds
 the barcode, each barcode becomes a track named by it, in order of first
-appearance, every cell of a file goes in one group (``--groups`` for
-smaller ones), and there is one track per cell rather than a pair, since
-fragments have no strand. ``--cells`` gives a table, tab-separated or
+appearance, every cell of a file goes in one group, or in as few as the
+2**29 values a chunk holds allow (32,768 cells at the default tile;
+``--groups`` for smaller ones), and there is one track per cell rather
+than a pair, since fragments have no strand. ``--cells`` gives a table, tab-separated or
 ``.csv`` with a header, whose first column lists the barcodes to keep, in
 the order their tracks take: a ``name`` column names a cell's track,
 ``dtype`` sets its dtype, every other column, such as a cell type, becomes
@@ -160,7 +161,7 @@ so ``--cells`` with the called cells is the usual call. The file is read
 in BGZF units on the ``-p`` threads, as ``figwig bam2bw`` reads it, and
 each cell's fragment ends (``-f``, the usual choice; ``-ps`` and ``-ns``
 shift them) go in as entries, holding 8 bytes per end while the file is
-scanned. With several files each file's cells are its own group, named
+scanned and about three times that at the peak. With several files each file's cells are its own group, named
 ``<name>.<barcode>``, with the file's attributes from ``-m`` and the
 cell's from ``--cells``. :doc:`benchmarks` times the conversion against
 the other ways of making a per-cell file.

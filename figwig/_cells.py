@@ -664,7 +664,8 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 	-------
 	counts: dict
 		Chromosome name -> (positions, cells, counts), the sorted distinct
-		(position, cell) pairs with fragment ends and how many each has.
+		(position, cell) pairs with fragment ends and how many each has, as
+		uint32, int32 and uint32 arrays.
 
 	barcodes: list of str
 		The barcodes kept, cell number i being barcodes[i].
@@ -725,6 +726,10 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 	finally:
 		bar.close()
 
+	# One in-place sort, then the runs of equal keys; the arrays handed on
+	# are 32-bit, which every position, cell number and count fits, so that
+	# a file of hundreds of millions of ends holds at most about three
+	# copies of its keys at the peak.
 	keys.sort()
 	counts = {}
 	n_keys = len(keys)
@@ -737,14 +742,16 @@ def _read_cells(filename, args, chrom_sizes, field, barcodes, threads, idx=0):
 
 		distinct = keys[starts]
 		del keys
-		run_lengths = numpy.diff(starts, append=n_keys)
+		run_lengths = numpy.diff(starts, append=n_keys).astype(numpy.uint32)
 		del starts
 
-		positions = distinct & _POSITION_MASK
-		cells = (distinct >> _POSITION_BITS) & ((1 << cell_bits) - 1)
-		slots = distinct >> (_POSITION_BITS + cell_bits)
+		edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << (
+			_POSITION_BITS + cell_bits)
+		bounds = numpy.searchsorted(distinct, edges)
+		positions = (distinct & _POSITION_MASK).astype(numpy.uint32)
+		cells = ((distinct >> _POSITION_BITS) & ((1 << cell_bits) - 1)).astype(
+			numpy.int32)
 		del distinct
-		bounds = numpy.searchsorted(slots, numpy.arange(len(chroms) + 1))
 
 		for slot in numpy.flatnonzero(bounds[1:] > bounds[:-1]):
 			lo, hi = int(bounds[slot]), int(bounds[slot + 1])
