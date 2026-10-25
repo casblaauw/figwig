@@ -584,6 +584,59 @@ def _fold_batch(stats, rows, batch):
 	return flagged
 
 
+def _crc_tables():
+	"""The eight tables of a slicing-by-8 CRC-32 (the polynomial of zlib
+	and of the figwig file), as a (8, 256) uint32 array."""
+
+	tables = numpy.zeros((8, 256), dtype=numpy.uint32)
+	for i in range(256):
+		c = i
+		for _ in range(8):
+			c = (c >> 1) ^ 0xEDB88320 if c & 1 else c >> 1
+		tables[0, i] = c
+	for k in range(1, 8):
+		for i in range(256):
+			c = int(tables[k - 1, i])
+			tables[k, i] = int(tables[0, c & 0xFF]) ^ (c >> 8)
+	return tables
+
+
+_CRC_TABLES = _crc_tables()
+
+
+@numba.njit(nogil=True, cache=True)
+def _crc32_of(data, start, end, tables):
+	"""The CRC-32 of data[start:end], as zlib.crc32 gives it, eight bytes
+	at a time."""
+
+	c = numpy.uint32(0xFFFFFFFF)
+	i = start
+	while i + 8 <= end:
+		c ^= (numpy.uint32(data[i]) | (numpy.uint32(data[i + 1]) << 8) |
+			(numpy.uint32(data[i + 2]) << 16) | (numpy.uint32(data[i + 3]) << 24))
+		n = (numpy.uint32(data[i + 4]) | (numpy.uint32(data[i + 5]) << 8) |
+			(numpy.uint32(data[i + 6]) << 16) | (numpy.uint32(data[i + 7]) << 24))
+		c = (tables[7, c & 0xFF] ^ tables[6, (c >> 8) & 0xFF] ^
+			tables[5, (c >> 16) & 0xFF] ^ tables[4, c >> 24] ^
+			tables[3, n & 0xFF] ^ tables[2, (n >> 8) & 0xFF] ^
+			tables[1, (n >> 16) & 0xFF] ^ tables[0, n >> 24])
+		i += 8
+	while i < end:
+		c = tables[0, (c ^ numpy.uint32(data[i])) & 0xFF] ^ (c >> 8)
+		i += 1
+	return c ^ numpy.uint32(0xFFFFFFFF)
+
+
+@numba.njit(nogil=True, cache=True)
+def _crcs_of(data, cuts, tables, out):
+	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]] into out[k],
+	without the GIL, where a call of zlib.crc32 per piece held it for
+	every piece under 5 KB."""
+
+	for k in range(cuts.shape[0] - 1):
+		out[k] = _crc32_of(data, cuts[k], cuts[k + 1], tables)
+
+
 @numba.njit(nogil=True, cache=True)
 def _entry_bounds(positions, tracks, present):
 	"""The lowest and highest of `positions`, marking each track of
@@ -602,23 +655,28 @@ def _entry_bounds(positions, tracks, present):
 
 
 @numba.njit(nogil=True, cache=True)
-def _tile_cuts(positions, tile, per_batch):
-	"""Where to cut entries sorted by tile into batches of whole tiles
-	holding at least `per_batch` entries each, but for the last: the start
-	of each batch and the end, as an int64 array. Only the entries around
-	each cut are looked at."""
+def _tile_cuts(positions, tile, per_batch, max_tiles):
+	"""Where to cut entries sorted by tile into batches of whole tiles:
+	a batch ends at the first tile boundary after `per_batch` entries, or
+	after `max_tiles` tiles, whichever comes first, since each tile's chunk
+	costs the encoder's buffer bytes per track of the group. Returns the
+	start of each batch and the end, as an int64 array."""
 
 	n = positions.shape[0]
 	cuts = [0]
 	at = 0
-	while at < n:
-		end = min(at + per_batch, n)
-		if end < n:
-			t = positions[end - 1] // tile
-			while end < n and positions[end] // tile == t:
-				end += 1
-		cuts.append(end)
-		at = end
+	tiles = 1
+	previous = positions[0] // tile if n > 0 else 0
+	for e in range(1, n):
+		t = positions[e] // tile
+		if t != previous:
+			if e - at >= per_batch or tiles >= max_tiles:
+				cuts.append(e)
+				at = e
+				tiles = 0
+			tiles += 1
+			previous = t
+	cuts.append(n)
 	return numpy.array(cuts, dtype=numpy.int64)
 
 

@@ -2714,3 +2714,23 @@ def test_split_tasks_cut_between_tiles_no_window_spans(fw, ref, monkeypatch):
 	y = reader.read(chroms, starts, 30, bins=10, dtype='float64', n_jobs=4)
 	numpy.testing.assert_array_equal(y, dense.reshape(n, 5, 3, 10).sum(-1))
 	assert seen[0][0] >= 4 and not seen[0][1]
+
+
+def test_chunk_crcs_are_zlibs():
+	"""The CRC-32 kernel that checksums every chunk gives zlib's values on
+	pieces of every length, empty ones included."""
+
+	import zlib
+
+	from figwig.figwig import _crcs
+
+	rng = numpy.random.default_rng(0)
+	data = rng.integers(0, 256, 100_000, dtype=numpy.uint8).tobytes()
+	cuts = numpy.concatenate([[0], numpy.sort(rng.integers(0, len(data), 300)),
+		[len(data), len(data)]])
+	expected = [zlib.crc32(data[int(a):int(b)]) for a, b in zip(cuts[:-1],
+		cuts[1:])]
+	assert _crcs(data, cuts).tolist() == expected
+	for n in range(0, 40):
+		piece = data[:n]
+		assert _crcs(piece, numpy.array([0, n])).tolist() == [zlib.crc32(piece)]

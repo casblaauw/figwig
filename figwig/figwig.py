@@ -52,6 +52,8 @@ from typing import NamedTuple
 import numpy
 
 from ._figwig_kernels import _BLOCK_ENTRIES
+from ._figwig_kernels import _CRC_TABLES
+from ._figwig_kernels import _crcs_of
 from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _tile_cuts
@@ -122,6 +124,7 @@ _BATCH_BYTES = 1 << 25
 _BATCH_CHUNKS = 256
 _MIN_BATCH_CHUNKS = 16
 _BATCHES_PER_THREAD = 8
+_ENTRIES_PER_BATCH = 1 << 20
 _CHUNKS_PER_THREAD = 64
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
@@ -1799,12 +1802,16 @@ class FigWigWriter:
 			self._open[g] = None
 
 		# Batches of tiles that hold about _BATCH_BYTES of entries, or fewer
-		# so that each thread gets several.
+		# so that each thread gets several, but not fewer than
+		# _ENTRIES_PER_BATCH, since each batch costs this thread its
+		# bookkeeping: with 32 threads and a few hundred thousand entries
+		# per batch, that bookkeeping was most of what this thread did.
 		per_batch = _BATCH_BYTES // 8
 		if self._pool is not None:
-			per_batch = max(_BLOCK_ENTRIES, min(per_batch, len(positions) // (
+			per_batch = max(_ENTRIES_PER_BATCH, min(per_batch, len(positions) // (
 				_BATCHES_PER_THREAD * self.n_jobs)))
-		cuts = _tile_cuts(positions, tile, per_batch)
+		max_tiles = max(1, _BATCH_BYTES // (4 * n_tracks + 24))
+		cuts = _tile_cuts(positions, tile, per_batch, max_tiles)
 		for e0, e1 in zip(cuts[:-1].tolist(), cuts[1:].tolist()):
 			task = (self._entries_task, g, tid, track_ids[e0:e1], positions[e0:e1],
 				values[e0:e1], n_tracks)
@@ -2373,11 +2380,13 @@ def _moved(offsets, sizes, extents):
 
 
 def _crcs(data, cuts):
-	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]], as uint32."""
+	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]], as int64, in
+	one call without the GIL."""
 
-	view = memoryview(data)
-	return numpy.array([zlib.crc32(view[int(cuts[k]):int(cuts[k + 1])]) for k
-		in range(len(cuts) - 1)], dtype=numpy.int64)
+	out = numpy.empty(len(cuts) - 1, dtype=numpy.uint32)
+	_crcs_of(numpy.frombuffer(data, dtype=numpy.uint8), numpy.ascontiguousarray(
+		cuts, dtype=numpy.int64), _CRC_TABLES, out)
+	return out.astype(numpy.int64)
 
 
 def _gather_parts(parts):
