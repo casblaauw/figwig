@@ -290,21 +290,21 @@ def record_positions(args, pos_reads, neg_reads, chrom, five_prime, three_prime,
 # on the doubled coordinate line, 2 * start for the base a block enters and
 # 2 * end + 1 for the base after the one it leaves, so that the same keys,
 # sorts and run-length counts serve, and the coverage of each stretch
-# between events is their running sum (see `coverage_runs`). The shifts
+# between events is their running sum (see `_coverage_runs`). The shifts
 # move a read's first base and its end; a block they empty is skipped.
 
-def record_span(reads, chrom, start, end):
+def _record_span(reads, chrom, start, end):
 	if end > start:
 		reads[chrom][2 * start] += 1
 		reads[chrom][2 * end + 1] += 1
 
-def record_blocks(args, reads, chrom, blocks):
+def _record_blocks(args, reads, chrom, blocks):
 	last = len(blocks) - 1
 	for k, (start, end) in enumerate(blocks):
-		record_span(reads, chrom, start + (args.pos_shift if k == 0 else 0),
+		_record_span(reads, chrom, start + (args.pos_shift if k == 0 else 0),
 			end + (args.neg_shift if k == last else 0))
 
-def coverage_runs(positions, counts, size):
+def _coverage_runs(positions, counts, size):
 	"""The runs of coverage from the counted events on the doubled line:
 	(starts, ends, values) of the stretches whose coverage is not 0,
 	clipped to [0, size), and the coverage of the bases clipped away."""
@@ -338,7 +338,7 @@ def coverage_runs(positions, counts, size):
 
 	return starts, ends, values, discarded
 
-def read_count(positions, counts, size):
+def _read_count(positions, counts, size):
 	"""The reads behind coverage events: the start events that lie inside
 	the chromosome, which is the depth `-r` divides by with --coverage, as
 	the entries kept are without it."""
@@ -2397,7 +2397,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 					reads = neg_reads
 
 				if coverage:
-					record_blocks(args, reads, chrom, read.get_blocks())
+					_record_blocks(args, reads, chrom, read.get_blocks())
 					continue
 
 				reads[chrom][three_prime if use_three_prime else five_prime] += 1
@@ -2481,7 +2481,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 						repr(end)))
 
 			if args.coverage:
-				record_span(pos_reads, chrom, start, end)
+				_record_span(pos_reads, chrom, start, end)
 				continue
 
 			pos_reads[chrom][end-1 if args.three_prime else start] += 1
@@ -2767,8 +2767,8 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 				# clipped away are the discarded entries, and the depth is
 				# the reads that start inside it.
 				if read_depth is not None:
-					read_depth += read_count(idxs, counts, size)
-				starts, ends, values, lost = coverage_runs(idxs, counts, size)
+					read_depth += _read_count(idxs, counts, size)
+				starts, ends, values, lost = _coverage_runs(idxs, counts, size)
 				discarded[chrom] += lost
 				reads_[chrom] = starts, ends, values
 				continue

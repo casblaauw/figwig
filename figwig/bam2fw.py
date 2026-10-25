@@ -156,8 +156,8 @@ def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 	that start inside it, as (runs, depth)."""
 
 	from .bam2bw import as_arrays
-	from .bam2bw import coverage_runs
-	from .bam2bw import read_count
+	from .bam2bw import _coverage_runs
+	from .bam2bw import _read_count
 
 	trimmed, discarded = [], collections.defaultdict(int)
 	for pos_reads, neg_reads in reads:
@@ -170,8 +170,8 @@ def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 			for chrom, size in chrom_sizes:
 				positions, values = as_arrays(counts.pop(chrom))
 				if coverage:
-					depth += read_count(positions, values, size)
-					starts, ends, run_values, lost = coverage_runs(positions, values,
+					depth += _read_count(positions, values, size)
+					starts, ends, run_values, lost = _coverage_runs(positions, values,
 						size)
 					discarded[chrom] += lost
 					strands[key][chrom] = starts, ends, run_values
