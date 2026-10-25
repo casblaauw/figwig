@@ -1,26 +1,18 @@
 # Writing bigWigs
 
-## Signatures
-
-```python
-write_bigwig(paths, chrom_sizes, chroms, starts, values, ends=None, missing=0.0,
-	zooms=10, level=6, engine='auto', n_jobs=8)
-BigWigWriter(path, chrom_sizes, zooms=10, level=6, engine='auto', n_jobs=8)
-writer.write(chroms, starts, values, ends=None, missing=0.0)
-writer.close()   # writes the index, zoom levels and header; `with` calls it
-```
+`write_bigwig(paths, chrom_sizes, chroms, starts, values, ends=None, missing=0.0, zooms=10, level=6, engine='auto', n_jobs=8)`
+writes everything in one call; `BigWigWriter(path, chrom_sizes, zooms=10, level=6, engine='auto', n_jobs=8)`
+with `write(chroms, starts, values, ends=None, missing=0.0)` writes a batch
+at a time and finishes the file at `close()` (`with` calls it).
 
 | Items | `ends` | `values`, one path | `values`, a list of k paths |
 |---|---|---|---|
-| windows | `None` | `(n, width)` | `(n, k, width)`; channel `i` goes to `paths[i]` |
+| windows | `None` | `(n, width)` | `(n, k, width)`, channel `i` to `paths[i]` |
 | intervals | `(n,)` | `(n,)` | `(n, k)` |
-| single bases, such as per-base counts | `None` | `(n, 1)`: windows of width 1 | `(n, k, 1)` |
+| single bases (per-base counts) | `None` | `(n, 1)`, windows of width 1 | `(n, k, 1)` |
 
-A list of one path still needs the channel axis: `(n, 1, width)`.
-
-## Model predictions
-
-`write_bigwig` takes the layout `read_bigwig` gives and models predict:
+A list of one path still needs the channel axis. `chrom_sizes` is a dict or
+a list of pairs; `BigWigReader(path).chrom_sizes` copies a file's.
 
 ```python
 import numpy
@@ -38,44 +30,33 @@ print(numpy.array_equal(y, y_hat))
 # True
 ```
 
-To copy a file's chromosomes, pass `BigWigReader(path).chrom_sizes`.
-
 ## Rules
 
-Each of these raises `ValueError`, and a call that raises writes nothing.
+Each raises `ValueError`; a call that raises writes nothing and the writer
+stays usable.
 
-- Every chromosome written must be in `chrom_sizes`.
-- Within one call, items may come in any order but must not overlap. A
-  window's full width counts, even where its values are `missing` or NaN.
-- Each call's items come after the last call's: on a chromosome later in
-  `chrom_sizes`, or on the same one at or after the last call's last end.
-  `BigWigReader.chrom_sizes` is in the order the file stores, which is name
-  order (chr1, chr10, chr11, …, chr2) in ENCODE and UCSC files, so writing
-  chr1, chr2, … one call each raises at chr10 with "chromosome 'chr10' is
-  written after 'chr9', but comes before it in chrom_sizes".
-  Loop over `writer.chrom_sizes`, or build `chrom_sizes` in the order you
-  write.
-- `starts` must be integers and at least 0. An interval must end after its
-  start and at most at its chromosome's length.
-- A window may run past the end of its chromosome only where its values are
-  NaN. Predictions for windows near a chromosome's end raise with "runs past
-  the end of its chromosome, at L, where its values must be NaN" unless
-  `y[..., L - start:] = numpy.nan` first.
-- Values must be finite or NaN, and within float32's range. They are written
-  as float32.
+- Every chromosome written is in `chrom_sizes`.
+- Within one call items may come in any order but must not overlap. A
+  window's full width counts, even where its values are `missing` or NaN:
+  overlapping predictions must be averaged first and written as single
+  bases or intervals.
+- Each call's items come after the last call's: a later chromosome in
+  `chrom_sizes`, or the same one at or after the last end. An ENCODE file's
+  `chrom_sizes` is in name order, so writing chr1, chr2, … one call each
+  raises at chr10. Loop over `writer.chrom_sizes`, or build `chrom_sizes`
+  in writing order.
+- A window may run past its chromosome's end only where its values are
+  NaN: `y[..., length - start:] = numpy.nan` before writing the last window.
+- Values are written as float32 and must be finite or NaN.
 
 ## What is left out
 
-A base or interval whose value is `missing` (0.0 unless given) or NaN is not
-written. With `missing=0.0`, -0.0 is left out too. Reading with the same
-`missing` gives the values back. To store zeros as data, write and read with
+Bases and intervals whose value is `missing` (0.0 by default) or NaN are not
+written, and -0.0 counts as 0.0, so reading with the same `missing` gives
+the values back. To store zeros as data, write and read with
 `missing=numpy.nan`.
 
 ## A batch at a time
-
-`BigWigWriter` writes values as they come, so a track larger than memory,
-such as genome-wide predictions, can be written one batch of windows at a
-time:
 
 ```python
 import numpy
@@ -95,41 +76,23 @@ print(BigWigReader("track.bw").read("chr2", [49_000], width=1000).shape)
 # (1, 1000)
 ```
 
-- The file is not a bigWig until `close`. Reading it before raises
-  "track.bw is not a bigWig file."
-- An exception inside the `with` block abandons the file without a header,
-  which raises the same way on a read. Write it again.
-- `write_bigwig` with several paths writes them one after another. If one
-  fails, it is left without a header and the later ones are not written.
+- The file is not a bigWig until `close`: a read before it, or after an
+  exception inside the `with` block, says "is not a bigWig file". Write it
+  again.
+- `write_bigwig` with several paths writes them one after another; if one
+  fails it is left without a header and the later ones are not written.
+- Working memory does not grow with the size of a call.
 
 ## Options
 
 | Option | Default | When to change it |
 |---|---|---|
-| `zooms` | 10 | 0 when no genome browser will draw the file. Building zoom levels takes most of a write's time. |
-| `engine` | `'auto'`: libdeflate when the `deflate` package loads, else zlib | `'zlib'` for bytes identical to pyBigWig's (with `level=6`, `zooms=0`, `missing=numpy.nan`). `'isal'` is fastest at levels 1 to 3, but its files at levels 1 and 2 differ from run to run. |
-| `level` | 6 | 1 to write faster. `figwig bam2bw` writes libdeflate level 1, into files 3% larger than pyBigWig's level 6. |
-| `n_jobs` | 8 | threads that compress blocks, besides the calling thread. See `references/threads-and-memory.md`. |
+| `zooms` | 10 | `0` unless a genome browser will draw the file: building zoom levels is most of a write's time, and on sparse count tracks they can multiply the file size. |
+| `engine` | `'auto'`: libdeflate if the `deflate` package loads, else zlib | `'zlib'` for bytes identical to pyBigWig's (with `level=6`, `zooms=0`, `missing=numpy.nan`, intervals or single bases). `'isal'` is fastest at levels 1 to 3 but its bytes differ run to run at 1 and 2. |
+| `level` | 6 | 1 to write faster for a slightly larger file. |
+| `n_jobs` | 8 | threads compressing blocks beside the calling thread; `references/threads-and-memory.md`. |
 
-The bytes written do not depend on `n_jobs` or on how values are split into
-calls, except with `'isal'`. figwig picks fixedStep, varStep or bedGraph
-sections for each window by size; there is nothing to set.
-
-## Per-base counts
-
-Single bases are windows of width 1, written as varStep sections:
-
-```python
-import numpy
-from figwig import BigWigReader
-from figwig import write_bigwig
-
-positions = numpy.array([1000, 1003, 1004, 2050])
-counts = numpy.array([3, 1, 1, 7], dtype=numpy.float32)
-write_bigwig("counts.bw", {"chr1": 10_000}, "chr1", positions, counts[:, None])
-print(BigWigReader("counts.bw").read("chr1", [1000], width=6))
-# [[3. 0. 0. 1. 1. 0.]]
-```
-
-To make count tracks from reads, use `figwig bam2bw`
-(`references/bam2bw.md`).
+The bytes do not depend on `n_jobs` or on how values are split into calls
+(except `'isal'`). Section types (fixedStep, varStep, bedGraph) are chosen
+per window by size; there is nothing to set. Single bases come out as
+varStep, which is what `figwig bam2bw` writes (`references/bam2bw.md`).

@@ -1,51 +1,74 @@
 # Errors and warnings
 
-Messages are quoted up to the first value they fill in.
+Messages are quoted up to the first value they fill in. A call that raises
+writes nothing; writers stay usable.
 
-## Reading
+## Reading bigWigs
 
-| Message | Cause | Fix |
-|---|---|---|
-| `X is not a bigWig file.` | not a bigWig; or a figwig file that was never closed, or whose `with` block raised | check the path; write the file again and let `close` run |
-| `X is a bigBed file; figwig reads bigWig files.` | bigBed | pybigtools or pyBigWig |
-| `X is a big-endian file, which figwig does not read.` | big-endian bigWig | pyBigWig |
-| `The chromosome tree of X cannot be read…`, `The data index of X cannot be read…` | corrupt or truncated file | download it again; or fall back (`references/reading.md`) |
-| `N windows overlap data blocks that figwig cannot read in X: …` | a block that does not decompress, an unknown section type, or intervals that overlap or are unsorted | fall back to pybigtools, which sums overlapping intervals |
-| `N windows start before 0 or end past 2**32 - 1, such as chr1:-5-5.` | windows centred near a chromosome's start | `numpy.maximum(starts, 0)` |
-| `starts must be integers, not float64.` | float starts, often a pandas column that held a NaN | `.astype("int64")` |
-| `chroms must have one name per start, or be a single name.` | lengths differ | pass one name, or one per window |
-| `out must be a writeable, C-contiguous float32 array of shape (n, width).` | wrong `out` | allocate `numpy.empty(shape, dtype=numpy.float32)`; a list of files needs `(n, len(files), width)` |
-| `n_jobs must be at least 1, or -1 for every CPU.` | `n_jobs=0` or below -1 | |
-| `FileNotFoundError` on an `https://` path | figwig does not read URLs | download the file first |
-| `UserWarning: N windows are on chromosomes not in X, and are 0.0 throughout: …` | no data on those chromosomes, or `1` against `chr1` naming | `set(chroms) - set(reader.chrom_sizes)`; rename, or expect `missing` there |
+| Message | Cause → fix |
+|---|---|
+| `X is not a bigWig file.` | not a bigWig, or one figwig wrote whose writer never reached `close` (an exception in the `with` block) → write it again |
+| `X is a bigBed file; figwig reads bigWig files.`, `X is a big-endian file, which figwig does not read.` | → pybigtools or pyBigWig |
+| `The chromosome tree of X cannot be read…`, `The data index of X cannot be read…` | corrupt or truncated → download again, or fall back (`references/reading.md`) |
+| `N windows overlap data blocks that figwig cannot read in X: …` | a block that does not decompress, an unknown section type, overlapping or unsorted intervals → pybigtools, which sums overlaps |
+| `N windows start before 0 or end past 2**32 - 1, such as chr1:-5-5.` | → `numpy.maximum(starts, 0)` |
+| `starts must be integers, not float64.` | a pandas column that held a NaN → `.astype("int64")` |
+| `chroms must have one name per start, or be a single name.` | |
+| `out must be a writeable, C-contiguous float32 array of shape (n, width).` | a list of files needs `(n, len(files), width)` |
+| `FileNotFoundError` on an `https://` path | → download first |
+| `UserWarning: N windows are on chromosomes not in X, and are 0.0 throughout: …` | no data there, or `1` against `chr1` → `set(chroms) - set(reader.chrom_sizes)` |
 
-## Writing
+## Writing bigWigs
 
-Every call that raises writes nothing; the writer stays usable.
+| Message | Cause → fix |
+|---|---|
+| `chromosome 'chr10' is written after 'chr9', but comes before it in chrom_sizes.` | calls not in `chrom_sizes` order (ENCODE's is name order) → loop over `writer.chrom_sizes`, or build `chrom_sizes` in writing order |
+| `window 0 on 'chr1' starts at 50, before the end of what was written on it before, 101.` | → sort batches by position |
+| `window 1 on 'chr1', at 5, starts before window 0 ends, at 10; they must not overlap.` | the full width counts even where values are `missing` or NaN → average overlaps, write single bases (`(n, 1)` values) or intervals |
+| `window 0 on 'chr2' runs past the end of its chromosome, at 5000, where its values must be NaN.` | → set the values past the end to NaN |
+| `chromosome 'chrX' is not one of the writer's chromosomes.` | → add it to `chrom_sizes`, or drop the items |
+| `values must be finite or NaN, but … holds an infinite value.`, `… holds values outside float32's range.` | → replace or rescale; NaN leaves a base out |
+| `values must have one row per start, of shape (n, width), not (n,); pass ends to write intervals.` | → `values[:, None]` for single bases, or `ends` |
+| `values must have one channel per path, of shape (n, 1, width), not (n, width).` | a list of paths → one path, or `values[:, None]` |
+| `values must hold one value per interval, of shape (n,), not …` | 2-D values with `ends` |
+| `engine='libdeflate' needs the deflate package: pip install deflate.`, `engine='libdeflate' needs libdeflate's functions, which could not be loaded…` (Windows) | → the `fast` extra, or `engine='zlib'` |
+| `level must be from 0 to 9 with engine 'zlib', not 12.` | zlib 0-9, libdeflate 0-12, isal 0-3 |
+| `this BigWigWriter has been closed.` | `write` after `close` |
 
-| Message | Cause | Fix |
-|---|---|---|
-| `chromosome 'chr10' is written after 'chr9', but comes before it in chrom_sizes.` | calls not in `chrom_sizes` order; an ENCODE file's `BigWigReader.chrom_sizes` is in name order | loop over `writer.chrom_sizes`, or build `chrom_sizes` in writing order |
-| `window 0 on 'chr1' starts at 50, before the end of what was written on it before, 101.` | a call's items start before the last call's end | sort the batches by position before writing |
-| `window 1 on 'chr1', at 5, starts before window 0 ends, at 10; they must not overlap.` | overlapping windows or intervals in one call; a window's full width counts, even where its values are `missing` or NaN | average overlapping predictions, then write each merged stretch as single bases (`(n, 1)` values) or as intervals with `ends`, since a call takes one width |
-| `window 0 on 'chr2' runs past the end of its chromosome, at 5000, where its values must be NaN.` | a window over a chromosome's end with values there | set the values past the end to NaN |
-| `chromosome 'chrX' is not one of the writer's chromosomes.` | missing from `chrom_sizes` | add it, or drop those items |
-| `values must be finite or NaN, but … holds an infinite value.` | `inf` | replace it, or set it to NaN to leave it out |
-| `… holds values outside float32's range.` | float64 values too large for float32 | rescale |
-| `values must have one row per start, of shape (n, width), not (n,); pass ends to write intervals.` | 1-D values without `ends` | `values[:, None]` for single bases, or pass `ends` |
-| `values must have one channel per path, of shape (n, 1, width), not (n, width).` | a list of paths needs a channel axis | pass one path, or `values[:, None]` |
-| `values must hold one value per interval, of shape (n,), not …` | 2-D values with `ends` | one value per interval |
-| `engine='libdeflate' needs the deflate package: pip install deflate.` | `deflate` missing | install figwig's `fast` extra, or `engine='zlib'` |
-| `engine='libdeflate' needs libdeflate's functions, which could not be loaded…` | Windows | `engine='zlib'` or `'auto'` |
-| `level must be from 0 to 9 with engine 'zlib', not 12.` | level out of range | zlib 0-9, libdeflate 0-12, isal 0-3 |
-| `this BigWigWriter has been closed.` | `write` after `close` or after the `with` block | write inside the block |
+## figwig bam2bw and bam2fw
 
-## figwig bam2bw
+| Message | Cause → fix |
+|---|---|
+| `Filenames must end in one of .bam, .sam, .tsv, .tsv.gz, .bed, .bed.gz.` | → rename, `.txt.gz` to `.tsv.gz` |
+| `-p/--parallel must be a number of cores, or negative to count back from the number of CPUs, not 0.` | → `-p 8`, or `-p -1` |
+| `--mate_pairs only supports BAM/SAM input files.` | → drop `-mp` on BED/tsv |
+| the minus-strand bigWig is empty | BED/tsv has no strand → `-u` |
+| `X encountered in input but not in FASTA/chrom sizes.` (with `-v`) | expected for decoys and unplaced contigs; otherwise a naming mismatch or the wrong assembly |
 
-| Message | Cause | Fix |
-|---|---|---|
-| `Filenames must end in one of .bam, .sam, .tsv, .tsv.gz, .bed, .bed.gz.` | another extension | rename, such as `.txt.gz` to `.tsv.gz` |
-| `-p/--parallel must be a number of cores, or negative to count back from the number of CPUs, not 0.` | `-p 0` | `-p 8`, or `-p -1` for every CPU |
-| `--mate_pairs only supports BAM/SAM input files.` | `-mp` with BED/tsv | drop `-mp` |
-| the minus-strand bigWig is empty | BED/tsv input has no strand | `-u` |
-| `X encountered in input but not in FASTA/chrom sizes.` (with `-v`) | chromosome missing from `-s` | expected for decoy and unplaced contigs; otherwise a naming mismatch or the wrong assembly |
+## figwig files
+
+| Message | Cause → fix |
+|---|---|
+| `tracks must make up whole groups` | a `write` named some tracks of a group |
+| `written again after the group of ... moved on from it`, `starts at ..., before the end of what was written on it before` | a group returned to an earlier chromosome, or items out of order across calls |
+| `a window may run past the end only where its values are NaN or 0` | |
+| `track ... is uint16, and a value is ...`, `lies beyond float32's range` | a declared dtype the values do not fit → a wider one, or none |
+| `values must be finite or NaN, but one is infinite`, `an integer lies beyond 2**53, which a figwig file cannot hold exactly` | in `write`, `write_sparse` or a bigWig given to `bw2fw` → clip or scale first |
+| `entries ... both name base ...` | duplicate (track, position) entries in `write_sparse` → sum them first |
+| `which an earlier call already wrote`, `was begun by write` | `write` and `write_sparse` on one tile in two calls |
+| `came from another file, whose tracks cannot be written to` | `write` to a track `append` or `add_file` copied in |
+| `is being appended to by another writer` | two `append=True` writers → wait for the first to close |
+| `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
+| `the dense output would take ... GiB` | → `sparse=True`, `labels=`, fewer windows or `out=` |
+| `a sum lies outside what ... holds`, `has values from ... to ..., which uint8 does not hold`, `pass dtype= to read as another type` | `dtype=` or `out=` too narrow or of another type |
+| `is not one of the file's chromosomes, 'chr1', ...` | the file holds only the chromosomes it was written with |
+| `no track has an attribute` | `select` with a key no track has; the message names the keys |
+| `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | |
+| `ends must hold one end per start`, `an interval's end is before its start`, `paired=True needs one track per interval` | `sums` arguments |
+| `has no attribute 'read'`, `has no track with channel=...`, `are both channel=... of read=...` | `channels=`/`items=`: a track without the attribute, a missing item × channel, or two tracks for one |
+| `keeps no summary of the group of`, `keeps no zoom level k of the group of` | summaries passed 256 MB; the file was written without `zooms=k` (`reader.zooms`) |
+| `has been replaced or rewritten since this reader opened it`, `has been truncated` | a conversion or a closed append changed the file → open the reader again |
+| `it is version ... of the format, and this figwig reads version 1`, `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it → upgrade |
+| `... does not match its checksum` (tables, index, header, or a chunk with `verify=True`), `cannot be read as a figwig file`, `a chunk of ... cannot be read`, `is not a regular file` | damaged, truncated, crafted, or not a file; always `ValueError` |
+| `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it`, `exists; --force writes over it` | a command onto an existing output |
+| `the table has one column; a table is tab-separated` | a space-separated metadata table |

@@ -48,7 +48,7 @@ Writing
 Claude Code skill
 -----------------
 
-	- The skill covers figwig files: ``references/figwig-files.md`` gives the API, the layout for count tracks and for reads, cells or channels as tracks, the round trip of signal tracks through ``--missing nan``, the path onto a GPU, the converters and every error message.
+	- The skill covers figwig files, in ``references/figwig-reading.md``, ``figwig-writing.md`` and ``converters.md``, and ``references/recipes.md`` walks through whole jobs: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip and reads as tracks. The router routes by task and by symptom to the operation to use, every error message is in ``references/errors.md``, and the machine-bound timings are gone in favour of the rules they supported and a snippet to measure with. Re-run ``figwig install-skill --force`` to pick up the new skill.
 
 
 Version 0.1.0

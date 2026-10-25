@@ -1,108 +1,56 @@
-# Threads, memory and speed
+# Threads, memory and the first call
 
-The numbers below were measured on one machine, 2x AMD EPYC 9575F (256
-cores) at a load of about 20, with Python 3.13 and numba 0.68, as medians of
-3 to 5 runs. Speedups move with the CPU, the file and the load, so measure
-on the target machine before promising one (last section).
+Speedups move with the CPU, the file and the load; the rules below are
+stable, and the last section measures the numbers where they matter.
 
 ## Reading
 
-`n_jobs` is the most threads one read uses, counting every thread that does
-work while the calling thread waits: 8 by default, and -1 for every CPU the
-process may run on. A read sorts its windows, finds the data blocks
-they overlap, and splits those blocks into batches of 256, one batch per
-thread. A read whose windows touch few blocks gets few threads, whatever
-`n_jobs` is: it starts at most one thread per batch, and runs a single batch
-on the calling thread, so a large `n_jobs` costs nothing on a small read.
-
-One reader, opened and warmed up once, reading random 1,000 bp windows from a
-238 MB ATAC-seq bigWig:
-
-| Windows per read | 1 thread | 4 threads | 8 threads | 32 threads |
-|---|---|---|---|---|
-| 100 | 3.5 ms | 3.0 ms | 3.0 ms | 3.0 ms |
-| 1,000 | 29 ms | 19 ms | 19 ms | 18 ms |
-| 10,000 | 235 ms | 74 ms | 52 ms | 53 ms |
-| 100,000 | 756 ms | 221 ms | 128 ms | 74 ms |
-
-Reading 167,750 windows sorted by position, file opening included, took
-0.82 s on 1 thread, 0.13 s on 8 (6.1 times faster) and 0.074 s on 32 (11
-times). On a denser 645 MB DNase-seq bigWig it took 1.85, 0.27 and 0.16 s. pybigtools, the
-fastest of the other readers, took 1.25 s on 1 thread and was no faster on 8.
-
-- Batches of a thousand windows or fewer gain little from threads. In
-  DataLoader workers pass `n_jobs=1` and get parallelism from `num_workers`.
-- The cost per window falls as a read takes more windows: 35 µs per window
-  for 100 windows and 7.6 µs for 100,000 on one thread, 0.74 µs for 100,000
-  on 32. A training loop reading 128 random peak windows per call took
-  4.1 ms per call with a reused reader (32 µs per window), and 5.2 ms given a
-  path, which re-reads the index. When the windows fit in memory, read them
-  all in one call and index the array each step.
-- To read every window once, use `n_jobs` from 8 to 32.
+- bigWigs: a read sorts its windows, finds the data blocks they touch and
+  splits them into batches of 256, one per thread, up to `n_jobs`. A read
+  of a few hundred windows gets one or two threads whatever `n_jobs` is;
+  reading every window in one call gains up to 8 to 32 threads. A reused
+  reader beats a path, which re-reads the index on every call.
+- figwig files: one thread per 64 chunks touched, up to `n_jobs`, with the
+  pool kept between reads. Gains end near 8 threads for dense reads. Sums
+  in position order take no copy of the output per thread; track order
+  takes one per thread, which the 8 GiB guard counts.
+- In DataLoader workers pass `n_jobs=1`; `num_workers` is the parallelism.
 
 ## Writing
 
-`n_jobs` is the most threads compressing data blocks, besides the calling
-thread, which lays out the values. Writing 15.9 million per-base counts:
-
-| Engine, zoom levels | 1 | 2 | 4 | 8 | 16 | 32 threads |
-|---|---|---|---|---|---|---|
-| libdeflate, none | 1.07 s | 0.47 s | 0.25 s | 0.18 s | 0.19 s | 0.23 s |
-| zlib, none | 4.22 s | 2.04 s | 1.04 s | 0.53 s | 0.28 s | 0.20 s |
-| libdeflate, 10 | 4.85 s | 2.50 s | 1.37 s | 0.75 s | 0.53 s | 0.55 s |
-
-pyBigWig took 4.20 s without zoom levels and 12.80 s with them.
-
-- libdeflate, the default when the `deflate` package is installed, gains
-  nothing past about 8 threads. zlib keeps gaining up to 32.
-- Zoom levels quadrupled the time here. Pass `zooms=0` when no genome
-  browser will draw the file.
-- With zoom levels, peak memory grew with threads: 580 MB on 1 thread and
-  1,028 MB on 32. Without them it stayed near 580 MB.
-
-## figwig bam2bw
-
-| Input | `-p 1` | `-p 2` | `-p 4` | `-p 8` | `-p 16` | `-p 32` |
-|---|---|---|---|---|---|---|
-| 2.4 GB ATAC-seq BAM, default flags | 9.35 s | 4.65 s | 2.71 s | 1.74 s | 1.75 s | 1.82 s |
-| 18.9 M scATAC fragments, `-f -u` | 2.91 s | 1.74 s | 1.41 s | 1.25 s | 1.30 s | 1.41 s |
-
-Gains end near `-p 8`. bam2bw 0.5.1 took 58.5 s and 28.5 s on these inputs
-at `-p 2`.
-Peak memory grew from 831 MB at `-p 1` to 1,032 MB at `-p 32` on the BAM.
-On a 10 GB BAM at `-p 1` the peak was 2.9 GB, and 4.9 GB with `-u -f`.
+- bigWigs: the calling thread lays out values while `n_jobs` threads
+  compress. With libdeflate the calling thread is the limit near 8 threads;
+  zlib keeps gaining to 32. Zoom levels add a pass over the data, about 4x
+  the time of a write without them, and their memory grows with threads.
+- figwig files: whole tiles encode on the pool, partial tiles and
+  intervals on the calling thread, so write windows for speed; the writer
+  holds about 0.5 GB plus two to three times one call's values, so aim for
+  calls of a few hundred MB. `bw2fw` stops gaining near `-p 8`; the
+  track-order writer does not gain.
+- `figwig bam2bw`: gains end near `-p 8`; peak memory is a few GB for a
+  10 GB BAM, nearly double with `-u -f`.
 
 ## Memory
 
-- A read's output takes `n * width * 4` bytes per file: 671 MB for 167,750
-  windows of 1,000 bp. Pass `out=` to reuse one array.
-- Each reading thread also holds its batch's decompressed blocks, each at
-  most the file's `uncompressBufSize` (32 KB in ENCODE files).
-- A write's working memory does not grow with the size of a call: 166 MB
-  above the values for 25 million values, 173 MB for 100 million, on 8
-  threads without zoom levels.
+- A dense output is `n × channels × width × itemsize`: 8,192 windows × 48
+  tracks × 2,048 bases is 3.2 GB as float32. `out=` reuses one array.
+- A sparse figwig read costs about 40 bytes per entry while sorting; a
+  `write_sparse` call about 90 bytes per entry (write a chromosome at a time).
+- A bigWig write's working memory does not grow with the size of a call.
+- Threads multiply across processes: 8 workers at `n_jobs=8` is 64
+  threads. Keep processes × `n_jobs` within the free cores, and set
+  `OPENBLAS_NUM_THREADS=1` for many short processes (numpy's OpenBLAS
+  otherwise starts a thread per CPU at import).
 
 ## The first call
 
-The first call in a new environment compiles figwig's numba kernels: 0.7 s
-for the bigWig reader, 1.1 s for `figwig bam2bw`, and 27 s for the first
-dense read of a figwig file, with 21 s more for the first sparse read, 12 s
-for the first read into another output dtype, 11 s for the first sum per
-label or per bin, 12 s for track order and 8 s for the first write. numba
-caches them next to the installed package, or in the user's cache
-directory, and later processes load them in a tenth of a second. Warm up
-with a small read before timing, and before spawning DataLoader workers.
-On inputs bam2bw finishes in under half a second, `figwig bam2bw` took a
-median 0.12 s longer, mostly importing numba.
-
-## Oversubscription
-
-Threads multiply across processes: 8 DataLoader workers at the default
-`n_jobs=8` start 64 threads. Keep processes times `n_jobs` within the free
-cores. On a shared machine, check the load first. numpy's OpenBLAS starts a
-thread per CPU when it is imported; set `OPENBLAS_NUM_THREADS=1` for many
-short processes, such as one `figwig bam2bw` per file, which do no linear
-algebra.
+The first call in a fresh environment compiles numba kernels: about a
+second for the bigWig reader and `figwig bam2bw`, tens of seconds for the
+first dense figwig read and more for each further kind (sparse, another
+output dtype, sums, track order, a write). numba caches them next to the
+installed package or in the user's cache directory; later processes load
+them in a fraction of a second. Warm up with a small call before timing and
+before spawning DataLoader workers, each of which loads the cache.
 
 ## Measuring on the target machine
 
@@ -121,6 +69,6 @@ for n_jobs in (1, 2, 4, 8, 16):
 	print(n_jobs, round(time.perf_counter() - start, 3))
 ```
 
-Use the real window count and width. figwig's repository has
-`benchmarks/compare_readers.py` and `benchmarks/compare_writers.py`, which
-time figwig against pybigtools, pyBigWig and pybbi on any bigWigs.
+Use the real window count and width, and `FigWigReader` the same way. The
+repository's `benchmarks/compare_readers.py`, `compare_writers.py` and
+`compare_formats.py` time figwig against the other libraries and formats.
