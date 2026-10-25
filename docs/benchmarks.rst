@@ -460,34 +460,35 @@ the called cells.
 =====================================================  =======  ========  ========  ========
 conversion of the 10x PBMC fragments file              threads  time      peak RSS  output
 =====================================================  =======  ========  ========  ========
-``figwig bam2fw --barcode-column 4 --cells``           1        60.3 s    15.7 GB   1.11 GB
-``figwig bam2fw --barcode-column 4 --cells``           8        10.2 s    19.3 GB   1.11 GB
-``figwig bam2fw --barcode-column 4 --cells``           32       9.8 s     22.2 GB   1.11 GB
-``figwig bam2fw --barcode-column 4``, every barcode    8        41.0 s    25.2 GB   1.26 GB
+``figwig bam2fw --barcode-column 4 --cells``           1        60.1 s    15.8 GB   1.11 GB
+``figwig bam2fw --barcode-column 4 --cells``           8        9.1 s     18.2 GB   1.11 GB
+``figwig bam2fw --barcode-column 4 --cells``           32       5.5 s     21.9 GB   1.11 GB
+``figwig bam2fw --barcode-column 4``, every barcode    8        44.5 s    21.8 GB   1.26 GB
 pandas + ``write_sparse``                              8        140.3 s   23.7 GB   1.11 GB
 pandas + scipy CSR, ``save_npz``                       1        125.1 s   12.4 GB   29.1 GB
 SnapATAC2 ``import_fragments``                         8        217.4 s   8.1 GB    1.02 GB
 =====================================================  =======  ========  ========  ========
 
-The command is 14 times faster than the recipe it replaces and takes
-less memory, and 21 times faster than SnapATAC2, which holds less memory
+The command is 15 times faster than the recipe it replaces and takes
+less memory, and 24 times faster than SnapATAC2, which holds less memory
 but writes fragments, from which counts over windows or peaks are still
 to be computed, where the figwig file's pseudobulks and per-cell windows
 read as the single-cell table above shows. The scan of the file runs on
-the threads (28 s on one, 4.2 s on 8, 3.7 s on 32, on its own), each
-chromosome's keys are merged, counted and decoded on them, and the
-writer encodes on them; what stays on one thread is the reading and
-collection of the file's units, the writer's own thread and start-up,
-about 8 s in all, so the whole gains 6 times on 8 threads and little
-past them. The peak is three to four times the 8 bytes per fragment end
-the keys take. Every barcode of the file, 573,156 tracks in 18 groups
-of 32,768, costs four times as long, since each unit of the file then
-scans a copy of the barcode table and the barcodes it finds are
-numbered afterwards, for a file 13% larger. On the 1,001,098-fragment
-``large`` file of the called cells, the figwig command took 1.3 s on 8
-threads and 1.9 s on one, the recipe 1.9 and 6 s, SnapATAC2 1.9 and 2 to
-7 s, and the scipy matrix 16 s (medians of two), at 0.6 to 1.3 GB for
-the figwig command, 0.3 GB for SnapATAC2 and 3.3 GB for scipy.
+the threads (28 s on one, 4.2 s on 8, 1.1 s on 32, on its own), each
+chromosome's keys are merged, counted and decoded on them, the writer
+encodes, compresses and checksums on them, and what stays on one thread
+is the reading of the file's units, the writer's own thread and
+start-up, about 3 s in all, so the whole gains 6.6 times on 8 threads
+and 11 times on 32. The peak is three to four times the 8 bytes per
+fragment end the keys take. Every barcode of the file, 573,156 tracks
+in 18 groups of 32,768, costs five times as long, since each unit of
+the file then scans a copy of the barcode table and the barcodes it
+finds are numbered afterwards, for a file 13% larger. On the
+1,001,098-fragment ``large`` file of the called cells, the figwig
+command took 1.4 s on 8 threads and 1.7 s on one, the recipe 1.9 and
+6 s, SnapATAC2 1.9 and 2 to 7 s, and the scipy matrix 16 s (medians of
+two), at 0.25 to 0.5 GB for the figwig command, 0.3 GB for SnapATAC2
+and 3.3 GB for scipy.
 
 Compression levels and codecs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
