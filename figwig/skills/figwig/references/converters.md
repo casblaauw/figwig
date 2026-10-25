@@ -68,7 +68,8 @@ file becomes its own pair of tracks `<name>.+` and `<name>.-` (one with
 `-u`) in one group, named by the table's `name` column or the file name;
 the table's other columns are the tracks' attributes, plus `strand`. `-r`
 divides by each file's own depth. Counts are written as entries at level 1
-(`-l` otherwise). Needs the `bam2bw` extra; Linux and macOS.
+(`-l` otherwise); with `-c` (aligned-base coverage) as runs, each track its
+own group. Needs the `bam2bw` extra; Linux and macOS.
 
 `--barcode-column 4` (the column, from 1; 4 in a Cell Ranger fragments
 file) writes a fragments file as one track per cell, named by its barcode,

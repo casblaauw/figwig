@@ -87,6 +87,13 @@ def _input_arguments(parser):
 		help="The data is fragments and so both ends should be recorded.")
 	end_group.add_argument('-3p', '--three_prime', action='store_true', default=False,
 		help="Record the 3' end of each read instead of the 5' end.")
+	end_group.add_argument('-c', '--coverage', action='store_true', default=False,
+		help="""Count every aligned base of each read (its CIGAR's M, = and X
+		runs, so a deletion or a skipped intron is not covered), or every
+		base of each interval of a BED/tsv file, instead of one end: the
+		coverage deepTools' bamCoverage gives at 1 bp bins. The shifts move
+		the first base (-ps) and the end (-ns); a shift that empties a read
+		leaves it uncovered. Not with --mate_pairs.""")
 
 	parser.add_argument('-ps', '--pos_shift', default=0, type=int,
 		help="""A shift to apply to positive strand reads.""")
@@ -189,6 +196,9 @@ def _check_filenames(args):
 		for filename in args.filename:
 			if not filename.endswith(('.bam', '.sam')):
 				raise ValueError("--mate_pairs only supports BAM/SAM input files.")
+		if getattr(args, 'coverage', False):
+			raise ValueError("--coverage does not take --mate_pairs: a pair's "
+				"span is not defined by one position.")
 
 
 # Here, we are determining the chromosomes and their sizes. This is necessary
@@ -274,6 +284,68 @@ def record_positions(args, pos_reads, neg_reads, chrom, five_prime, three_prime,
 	if args.fragments:
 		reads[chrom][five_prime if args.three_prime else three_prime] += 1
 
+# With --coverage, every aligned base of a read counts: the CIGAR's M, = and
+# X runs, as pysam's get_blocks() and deepTools give them, so that a
+# deletion or a skipped intron is not covered. The counts are kept as events
+# on the doubled coordinate line, 2 * start for the base a block enters and
+# 2 * end + 1 for the base after the one it leaves, so that the same keys,
+# sorts and run-length counts serve, and the coverage of each stretch
+# between events is their running sum (see `_coverage_runs`). The shifts
+# move a read's first base and its end; a block they empty is skipped.
+
+def _record_span(reads, chrom, start, end):
+	if end > start:
+		reads[chrom][2 * start] += 1
+		reads[chrom][2 * end + 1] += 1
+
+def _record_blocks(args, reads, chrom, blocks):
+	last = len(blocks) - 1
+	for k, (start, end) in enumerate(blocks):
+		_record_span(reads, chrom, start + (args.pos_shift if k == 0 else 0),
+			end + (args.neg_shift if k == last else 0))
+
+def _coverage_runs(positions, counts, size):
+	"""The runs of coverage from the counted events on the doubled line:
+	(starts, ends, values) of the stretches whose coverage is not 0,
+	clipped to [0, size), and the coverage of the bases clipped away."""
+
+	if len(positions) == 0:
+		empty = numpy.empty(0, dtype='int64')
+		return empty, empty, empty, 0
+
+	places = positions >> 1
+	deltas = numpy.where(positions & 1, -counts, counts)
+	depth = numpy.cumsum(deltas)
+	last = numpy.empty(len(places), dtype=bool)
+	last[-1] = True
+	numpy.not_equal(places[1:], places[:-1], out=last[:-1])
+	edges = places[last]
+	values = depth[last][:-1]
+	starts, ends = edges[:-1], edges[1:]
+	keep = values != 0
+	starts, ends, values = starts[keep], ends[keep], values[keep]
+
+	discarded = 0
+	outside = (starts < 0) | (ends > size)
+	if outside.any():
+		clipped_starts = numpy.maximum(starts, 0)
+		clipped_ends = numpy.minimum(ends, size)
+		lost = (ends - starts) - numpy.maximum(clipped_ends - clipped_starts, 0)
+		discarded = int((lost[outside] * values[outside]).sum())
+		starts, ends = clipped_starts, clipped_ends
+		keep = ends > starts
+		starts, ends, values = starts[keep], ends[keep], values[keep]
+
+	return starts, ends, values, discarded
+
+def _read_count(positions, counts, size):
+	"""The reads behind coverage events: the start events that lie inside
+	the chromosome, which is the depth `-r` divides by with --coverage, as
+	the entries kept are without it."""
+
+	inside = ((positions & 1) == 0) & (positions >= 0) & (positions < 2 * size)
+	return int(counts[inside].sum())
+
 def record_mate_pair(args, pos_reads, neg_reads, chrom, anchor, other):
 	# The RNA's 5' end is the anchor mate's own 5' end (per --rna5); the RNA's
 	# 3' end is the other mate's own 5' end, since that mate started
@@ -342,6 +414,8 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 	pos_shift, neg_shift = options[0], options[1]
 	use_three_prime, fragments = options[2] != 0, options[3] != 0
 	unstranded, n_ref = options[4] != 0, options[5]
+	coverage = options[6] != 0
+	two = fragments or coverage
 	key_limit = numpy.int64(1) << _KEY_SHIFT
 
 	n_keys, n_missing, n_records = state[0], state[1], state[2]
@@ -432,7 +506,7 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 			status = 1
 			break
 
-		if ref_len == 0:
+		if ref_len == 0 and not coverage:
 			ref_len = 1
 
 		start = pos + pos_shift
@@ -454,12 +528,99 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 		if use_three_prime:
 			first, second = three_prime, five_prime
 
+		if coverage:
+			# The aligned blocks, counted first so that the last is known:
+			# M, = and X runs, split at D and N; I, S, H and P consume no
+			# reference. Each block is two keys, checked like the others.
+			n_blocks = numpy.int64(0)
+			open_block = False
+			for j in range(n_cigar):
+				word = u32(cigar + 4 * j)
+				op = word & 15
+				if op == 0 or op == 7 or op == 8:
+					if not open_block:
+						open_block = True
+						n_blocks += 1
+				elif op == 2 or op == 3:
+					open_block = False
+			if n_blocks == 0:
+				n_records += 1
+				off = end
+				continue
+			ref = pos
+			block_start = numpy.int64(-1)
+			k = numpy.int64(0)
+			bad = False
+			for j in range(n_cigar):
+				word = u32(cigar + 4 * j)
+				op = word & 15
+				length = numpy.int64(word >> 4)
+				if op == 0 or op == 7 or op == 8:
+					if block_start < 0:
+						block_start = ref
+					ref += length
+				elif op == 2 or op == 3:
+					if block_start >= 0:
+						a = block_start + (pos_shift if k == 0 else 0)
+						b = ref + (neg_shift if k == n_blocks - 1 else 0)
+						if b > a:
+							if (2 * a + _KEY_BIAS < 0 or 2 * a + _KEY_BIAS >= key_limit
+									or 2 * b + 1 + _KEY_BIAS < 0 or
+									2 * b + 1 + _KEY_BIAS >= key_limit):
+								bad = True
+								break
+							if bucket != current:
+								if mixed == 0:
+									if current >= 0:
+										finished[current] = 1
+									if finished[bucket] != 0:
+										mixed = 1
+									else:
+										run_starts[n_runs] = n_keys
+										run_buckets[n_runs] = bucket
+										n_runs += 1
+								current = bucket
+							keys[numpy.uint64(n_keys)] = out | (2 * a + _KEY_BIAS)
+							keys[numpy.uint64(n_keys + 1)] = out | (2 * b + 1 + _KEY_BIAS)
+							n_keys += 2
+						k += 1
+						block_start = -1
+					ref += length
+			if not bad and block_start >= 0:
+				a = block_start + (pos_shift if k == 0 else 0)
+				b = ref + neg_shift
+				if b > a:
+					if (2 * a + _KEY_BIAS < 0 or 2 * a + _KEY_BIAS >= key_limit or
+							2 * b + 1 + _KEY_BIAS < 0 or 2 * b + 1 + _KEY_BIAS >= key_limit):
+						bad = True
+					else:
+						if bucket != current:
+							if mixed == 0:
+								if current >= 0:
+									finished[current] = 1
+								if finished[bucket] != 0:
+									mixed = 1
+								else:
+									run_starts[n_runs] = n_keys
+									run_buckets[n_runs] = bucket
+									n_runs += 1
+							current = bucket
+						keys[numpy.uint64(n_keys)] = out | (2 * a + _KEY_BIAS)
+						keys[numpy.uint64(n_keys + 1)] = out | (2 * b + 1 + _KEY_BIAS)
+						n_keys += 2
+			if bad:
+				status = 1
+				break
+			n_records += 1
+			off = end
+			continue
+
 		first += _KEY_BIAS
 		second += _KEY_BIAS
 		if first < 0 or first >= key_limit:
 			status = 1
 			break
-		if fragments and (second < 0 or second >= key_limit):
+		if two and (second < 0 or second >= key_limit):
 			status = 1
 			break
 
@@ -477,7 +638,7 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 
 		keys[numpy.uint64(n_keys)] = out | first
 		n_keys += 1
-		if fragments:
+		if two:
 			keys[numpy.uint64(n_keys)] = out | second
 			n_keys += 1
 
@@ -1114,7 +1275,9 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 		nonlocal keys
 
 		n = len(buf)
-		needed = state[0] + 2 * (n // 36) + 2
+		# Two keys per record, or with coverage two per aligned block, a
+		# block taking at least 4 bytes of CIGAR.
+		needed = state[0] + (n // 2 if options[6] != 0 else 2 * (n // 36)) + 2
 		if needed > len(keys):
 			needed -= counter.compact(keys)
 		if needed > len(keys):
@@ -1206,7 +1369,8 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	missing_seen = numpy.zeros(len(tid_bucket), dtype='uint8')
 	missing_order = numpy.zeros(len(tid_bucket), dtype='int64')
 	options = numpy.array([args.pos_shift, args.neg_shift, args.three_prime,
-		args.fragments, args.unstranded, len(references)], dtype='int64')
+		args.fragments, args.unstranded, len(references), args.coverage],
+		dtype='int64')
 	state = numpy.zeros(7, dtype='int64')
 	state[4] = -1
 	run_starts = numpy.zeros(len(chroms) + 1, dtype='int64')
@@ -1330,7 +1494,8 @@ def _scan_intervals(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 	from once the caller has added the name or grown keys. Status 3: the line
 	at i holds something only the per-line loop handles.
 
-	mode is 0 to record the start, 1 to record end - 1, and 2 to record both.
+	mode is 0 to record the start, 1 to record end - 1, 2 to record both,
+	and 3 to record the span as the events 2 * start and 2 * end + 1.
 	"""
 
 	mask = table_hash.shape[0] - 1
@@ -1497,19 +1662,31 @@ def _scan_intervals(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 			start += pos_shift
 			end += neg_shift
 
-			if mode != 1:
-				if start < -_IV_KEY_OFFSET or start >= _IV_KEY_OFFSET:
+			if mode == 3:
+				first = 2 * start
+				second = 2 * end + 1
+				if (first < -_IV_KEY_OFFSET or first >= _IV_KEY_OFFSET or
+					second < -_IV_KEY_OFFSET or second >= _IV_KEY_OFFSET):
 					return 3, line_start, n_lines, n_keys, 0, 0
 
-				keys[n_keys] = slot * _IV_KEY_STEP + start + _IV_KEY_OFFSET
-				n_keys += 1
+				if end > start:
+					keys[n_keys] = slot * _IV_KEY_STEP + first + _IV_KEY_OFFSET
+					keys[n_keys + 1] = slot * _IV_KEY_STEP + second + _IV_KEY_OFFSET
+					n_keys += 2
+			else:
+				if mode != 1:
+					if start < -_IV_KEY_OFFSET or start >= _IV_KEY_OFFSET:
+						return 3, line_start, n_lines, n_keys, 0, 0
 
-			if mode != 0:
-				if end - 1 < -_IV_KEY_OFFSET or end - 1 >= _IV_KEY_OFFSET:
-					return 3, line_start, n_lines, n_keys, 0, 0
+					keys[n_keys] = slot * _IV_KEY_STEP + start + _IV_KEY_OFFSET
+					n_keys += 1
 
-				keys[n_keys] = slot * _IV_KEY_STEP + end - 1 + _IV_KEY_OFFSET
-				n_keys += 1
+				if mode != 0:
+					if end - 1 < -_IV_KEY_OFFSET or end - 1 >= _IV_KEY_OFFSET:
+						return 3, line_start, n_lines, n_keys, 0, 0
+
+					keys[n_keys] = slot * _IV_KEY_STEP + end - 1 + _IV_KEY_OFFSET
+					n_keys += 1
 
 		i = next_i
 		n_lines += 1
@@ -1847,7 +2024,8 @@ def _read_intervals(filename, args, chroms, idx, name, threads=1):
 		if len(data) > 0 and min(data) >= 33 and max(data) <= 126:
 			table.add(data, slot)
 
-	mode = 2 if args.fragments else (1 if args.three_prime else 0)
+	mode = 3 if args.coverage else (2 if args.fragments else (1 if
+		args.three_prime else 0))
 	compressed = filename[-4:] not in ('.tsv', '.bed')
 
 	if compressed:
@@ -2142,6 +2320,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 		mate_pairs = args.mate_pairs
 		fragments = args.fragments
 		use_three_prime = args.three_prime
+		coverage = args.coverage
 
 		for read in tqdm(bam.fetch(until_eof=True), disable=not args.verbose, position=idx, desc=name):
 			if read.is_unmapped:
@@ -2216,6 +2395,10 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 				else:
 					five_prime, three_prime = end - 1, start
 					reads = neg_reads
+
+				if coverage:
+					_record_blocks(args, reads, chrom, read.get_blocks())
+					continue
 
 				reads[chrom][three_prime if use_three_prime else five_prime] += 1
 				if fragments:
@@ -2296,6 +2479,10 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 				raise ValueError(("{}, line {}: expected numeric coordinates, "
 					"got {} and {}.").format(filename, i + 1, repr(start),
 						repr(end)))
+
+			if args.coverage:
+				_record_span(pos_reads, chrom, start, end)
+				continue
 
 			pos_reads[chrom][end-1 if args.three_prime else start] += 1
 			if args.fragments:
@@ -2462,9 +2649,11 @@ _LEVEL = 1
 
 def write_counts(writer, chrom_sizes, reads, scale_factor, read_depth):
 	"""Write each chromosome's counts, reads[chrom] = (sorted positions,
-	counts), times scale_factor and divided by read_depth unless it is None."""
+	counts), times scale_factor and divided by read_depth unless it is None.
+	With coverage, reads[chrom] = (starts, ends, values) are runs, written
+	as intervals."""
 
-	names, starts, counts = [], [], []
+	names, starts, ends, counts = [], [], [], []
 	n = 0
 
 	def flush():
@@ -2475,22 +2664,29 @@ def write_counts(writer, chrom_sizes, reads, scale_factor, read_depth):
 			values /= read_depth
 
 		codes = numpy.repeat(numpy.arange(len(names)), [len(s) for s in starts])
-		writer._write_items(names, codes, numpy.concatenate(starts),
-			values[:, None], None, _MISSING)
+		if ends:
+			writer._write_items(names, codes, numpy.concatenate(starts), values,
+				numpy.concatenate(ends), _MISSING)
+		else:
+			writer._write_items(names, codes, numpy.concatenate(starts),
+				values[:, None], None, _MISSING)
 
 	for chrom in dict.fromkeys(chrom for chrom, _ in chrom_sizes):
-		positions, chrom_counts = reads[chrom]
+		positions, *rest = reads[chrom]
+		chrom_counts = rest[-1]
 		if len(positions) == 0:
 			continue
 
 		names.append(chrom)
 		starts.append(positions)
+		if len(rest) == 2:
+			ends.append(rest[0])
 		counts.append(chrom_counts)
 		n += len(positions)
 
 		if n >= _WRITE_ITEMS:
 			flush()
-			names, starts, counts = [], [], []
+			names, starts, ends, counts = [], [], [], []
 			n = 0
 
 	if n > 0:
@@ -2557,6 +2753,7 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 	# from the read depth below.
 
 	discarded = collections.defaultdict(int)
+	read_depth = 0 if args.read_depth else None
 
 	for chrom, size in chrom_sizes:
 		strands = [pos_reads]
@@ -2565,11 +2762,24 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 
 		for reads_ in strands:
 			idxs, counts = reads_[chrom]
+			if args.coverage:
+				# The runs of coverage, clipped to the chromosome; the bases
+				# clipped away are the discarded entries, and the depth is
+				# the reads that start inside it.
+				if read_depth is not None:
+					read_depth += _read_count(idxs, counts, size)
+				starts, ends, values, lost = _coverage_runs(idxs, counts, size)
+				discarded[chrom] += lost
+				reads_[chrom] = starts, ends, values
+				continue
+
 			lo, hi = numpy.searchsorted(idxs, [0, size])
 
 			if lo > 0 or hi < len(idxs):
 				discarded[chrom] += int(counts[:lo].sum()) + int(counts[hi:].sum())
 				reads_[chrom] = idxs[lo:hi], counts[lo:hi]
+			if read_depth is not None:
+				read_depth += int(reads_[chrom][1].sum())
 
 	if len(discarded) > 0:
 		print("{} entries fell outside the provided chromosome sizes and were discarded ({}).".format(
@@ -2595,14 +2805,8 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 		outputs.append((open_bigwig(args.name + ".-.bw"), neg_reads))
 
 	try:
-		read_depth = None
-		if args.read_depth:
-			read_depth = sum([int(pos_reads[chrom][1].sum()) for chrom, _ in chrom_sizes])
-			if not args.unstranded:
-				read_depth += sum([int(neg_reads[chrom][1].sum()) for chrom, _ in chrom_sizes])
-
-			if args.verbose:
-				print("Dividing through by a read depth of {}.".format(read_depth))
+		if read_depth is not None and args.verbose:
+			print("Dividing through by a read depth of {}.".format(read_depth))
 
 		for writer, reads_ in outputs:
 			write_counts(writer, chrom_sizes, reads_, args.scale_factor, read_depth)

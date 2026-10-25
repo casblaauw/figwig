@@ -101,10 +101,12 @@ def _base_name(filename):
 	return name
 
 
-def _tracks_for_files(filenames, metadata, unstranded, dtype=None):
+def _tracks_for_files(filenames, metadata, unstranded, dtype=None,
+		coverage=False):
 	"""The track records of every file, as (tracks, groups): a track per
 	strand of each file, or one with `unstranded`, and the files' rows of the
-	metadata table as their attributes."""
+	metadata table as their attributes. With `coverage`, each track is its
+	own group, since the two strands' runs of coverage are written apart."""
 
 	rows = [None] * len(filenames)
 	if metadata is not None:
@@ -137,35 +139,69 @@ def _tracks_for_files(filenames, metadata, unstranded, dtype=None):
 				track['strand'] = strand
 			track.update(attributes)
 			tracks.append(track)
-			group.append(track_name)
-		groups.append(group)
+			if coverage:
+				groups.append([track_name])
+			else:
+				group.append(track_name)
+		if not coverage:
+			groups.append(group)
 
 	return tracks, groups
 
 
-def _trim_counts(reads, chrom_sizes, unstranded):
+def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 	"""Each file's counts as sorted arrays within their chromosomes, with
-	the entries that fall outside a chromosome dropped and counted."""
+	the entries that fall outside a chromosome dropped and counted; with
+	`coverage`, each chromosome's runs (starts, ends, values) and the reads
+	that start inside it, as (runs, depth)."""
 
 	from .bam2bw import as_arrays
+	from .bam2bw import _coverage_runs
+	from .bam2bw import _read_count
 
 	trimmed, discarded = [], collections.defaultdict(int)
 	for pos_reads, neg_reads in reads:
 		strands = {}
+		depth = 0
 		for key, counts in (('+', pos_reads), ('-', neg_reads)):
 			if unstranded and key == '-':
 				continue
 			strands[key] = {}
 			for chrom, size in chrom_sizes:
 				positions, values = as_arrays(counts.pop(chrom))
+				if coverage:
+					depth += _read_count(positions, values, size)
+					starts, ends, run_values, lost = _coverage_runs(positions, values,
+						size)
+					discarded[chrom] += lost
+					strands[key][chrom] = starts, ends, run_values
+					continue
 				lo, hi = numpy.searchsorted(positions, [0, size])
 				if lo > 0 or hi < len(positions):
 					discarded[chrom] += int(values[:lo].sum()) + int(values[hi:]
 						.sum())
 				strands[key][chrom] = positions[lo:hi], values[lo:hi]
-		trimmed.append(strands)
+		trimmed.append((strands, depth) if coverage else strands)
 
 	return trimmed, discarded
+
+
+def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
+		read_depth):
+	"""Write one file's runs of coverage, strands['+'][chrom] = (starts,
+	ends, values), as intervals of the tracks `names`, each its own group,
+	scaled as `_write_counts` scales counts."""
+
+	for name, key in zip(names, ('+', '-')):
+		for chrom, _ in chrom_sizes:
+			starts, ends, values = strands[key][chrom]
+			if len(starts) == 0:
+				continue
+			values = values.astype(numpy.float64)
+			values *= scale_factor
+			if read_depth is not None:
+				values /= read_depth
+			writer.write(chrom, starts, values[:, None], ends=ends, tracks=[name])
 
 
 def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
@@ -205,6 +241,9 @@ def _check_cell_arguments(args):
 				"not {}.".format(filename))
 	if args.groups is not None and args.groups < 1:
 		raise ValueError("--groups must be at least 1.")
+	if args.coverage:
+		raise ValueError("--barcode-column counts each cell's fragment ends; "
+			"--coverage is not taken with it.")
 
 
 def _cell_table(path):
@@ -391,7 +430,7 @@ def main(argv=None, prog='figwig bam2fw'):
 		cores = _cores(args.parallel)
 		if args.barcode_column is None:
 			tracks, groups = _tracks_for_files(args.filename, args.metadata,
-				args.unstranded, args.dtype)
+				args.unstranded, args.dtype, args.coverage)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)
 
@@ -407,7 +446,8 @@ def main(argv=None, prog='figwig bam2fw'):
 	if args.verbose:
 		print("\n" * len(args.filename))
 
-	files, discarded = _trim_counts(reads, chrom_sizes, args.unstranded)
+	files, discarded = _trim_counts(reads, chrom_sizes, args.unstranded,
+		args.coverage)
 	del reads
 	if len(discarded) > 0:
 		print("{} entries fell outside the provided chromosome sizes and were "
@@ -420,16 +460,25 @@ def main(argv=None, prog='figwig bam2fw'):
 				n_jobs=cores, zooms=args.zooms) as writer:
 			# The arrays `_write_counts` makes are the writer's to keep.
 			writer._copies = False
-			for strands, group in zip(files, groups):
+			per_file = len(groups) // len(files)
+			for k, strands in enumerate(files):
+				group = [name for names in groups[k * per_file:(k + 1) * per_file]
+					for name in names]
 				read_depth = None
+				if args.coverage:
+					strands, depth = strands
 				if args.read_depth:
-					read_depth = sum(int(values.sum()) for counts in strands.values()
-						for _, values in counts.values())
+					read_depth = depth if args.coverage else sum(int(values.sum())
+						for counts in strands.values() for _, values in counts.values())
 					if args.verbose:
 						print("Dividing {} through by a read depth of {}.".format(
 							group[0], read_depth))
 
-				_write_counts(writer, group, strands, chrom_sizes, args.scale_factor,
-					read_depth)
+				if args.coverage:
+					_write_coverage(writer, group, strands, chrom_sizes,
+						args.scale_factor, read_depth)
+				else:
+					_write_counts(writer, group, strands, chrom_sizes,
+						args.scale_factor, read_depth)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)

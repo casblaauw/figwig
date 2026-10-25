@@ -31,6 +31,19 @@ each read's or interval's start and ``-ns`` to its end, so when 5' ends are
 counted they shift the plus and minus strands; ATAC-seq's Tn5 correction is
 usually ``-ps 4 -ns -5``.
 
+``-c`` counts every aligned base of each read instead of one end: the
+CIGAR's M, = and X runs, so a deletion or a skipped intron is not
+covered, as pysam's ``get_blocks()`` and deepTools' ``bamCoverage`` count
+them, and every base of each interval of a BED/tsv file. The shifts then
+move a read's first base (``-ps``) and its end (``-ns``), and a shift that
+empties a read leaves it uncovered. The coverage is written as intervals
+of one value, a bedGraph section per stretch, which is far smaller than a
+value per base; ``-r`` divides by the reads that start inside their
+chromosome, and the bases a read extends past its chromosome's end are
+the entries reported as discarded. ``-c`` is not taken with ``-f``,
+``-3p`` or ``-mp``. On the 2.4 GB ATAC-seq BAM its bigWig held the same
+value at every base as ``bamCoverage --binSize 1`` (:doc:`benchmarks`).
+
 No zoom levels are written unless ``-z`` is given, so a bigWig meant for a
 genome browser needs ``-z 10``, say. They cost space on sparse count tracks:
 on the per-base counts of 401,000 ATAC-seq fragments, ``-z 10`` made the
@@ -38,7 +51,7 @@ bigWig 10 times larger, 20.4 MB against 2.0 MB.
 
 .. code-block:: text
 
-    usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p] [-ps POS_SHIFT]
+    usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p | -c] [-ps POS_SHIFT]
                          [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                          [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
                          -n NAME [-z ZOOMS] [-v]
@@ -56,6 +69,14 @@ bigWig 10 times larger, 20.4 MB against 2.0 MB.
       -f, --fragments       The data is fragments and so both ends should be
                             recorded.
       -3p, --three_prime    Record the 3' end of each read instead of the 5' end.
+      -c, --coverage        Count every aligned base of each read (its CIGAR's
+                            M, = and X runs, so a deletion or a skipped intron
+                            is not covered), or every base of each interval of
+                            a BED/tsv file, instead of one end: the coverage
+                            deepTools' bamCoverage gives at 1 bp bins. The
+                            shifts move the first base (-ps) and the end (-ns);
+                            a shift that empties a read leaves it uncovered.
+                            Not with --mate_pairs.
       -ps, --pos_shift POS_SHIFT
                             A shift to apply to positive strand reads.
       -ns, --neg_shift NEG_SHIFT

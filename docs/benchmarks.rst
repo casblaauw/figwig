@@ -105,6 +105,94 @@ figwig's bigWigs are 3% larger because they are compressed at level 1
 rather than pyBigWig's level 6. The first call in a new environment also
 compiles figwig's kernels, which took 1.1 s on the tiny input.
 
+Coverage of every aligned base
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``figwig bam2bw -c -u`` and deepTools 4.0.0's ``bamCoverage --binSize 1``
+each wrote the coverage of the same BAM's reads to one bigWig, on tmpfs,
+one run each at a load of 38 to 40, with the peak memory of the process
+tree sampled every 50 ms; ``figwig bam2fw -c -u`` wrote it as a figwig
+file. The two bigWigs hold the same value at every one of hg38's
+3,099,750,718 bases.
+
+====================================  ========  ========  ========  ========
+command                               threads   time      peak RSS  output
+====================================  ========  ========  ========  ========
+``figwig bam2bw -c -u``               1         11.9 s    1.6 GB    193 MB
+``figwig bam2bw -c -u``               8         3.4 s     2.0 GB    193 MB
+``figwig bam2bw -c -u``               32        3.7 s     2.0 GB    193 MB
+``figwig bam2fw -c -u``               8         14.4 s    2.2 GB    79 MB
+``bamCoverage --binSize 1``           1         46.2 s    1.3 GB    249 MB
+``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
+====================================  ========  ========  ========  ========
+
+The coverage is two events per read on the readers and sorts the end
+counts use, so it costs about what ``-f`` costs; the figwig file is a
+runs chunk per tile, which is why ``bam2fw`` takes longer to write and
+less space. deepTools' time is its own reading of the BAM through pysam,
+a process per thread.
+
+Ten more experiments of the test-data collection, from 40 MB to 2.4 GB,
+single- and paired-end, two genomes, spliced short and long reads, were
+converted the same way (tmpfs, one run each, load 35 to 45). In every one
+the two bigWigs hold the same value at every base of every chromosome of
+the BAM's header, 3.1 billion for hg38 and 2.7 billion for mm10, and the
+same total. Seconds and peak RSS at 1 / 8 threads or processes:
+
+.. list-table::
+   :header-rows: 1
+
+   * - experiment
+     - BAM
+     - ``figwig bam2bw -c -u``, 1 / 8 threads
+     - ``bamCoverage --binSize 1``, 1 / 8 processes
+   * - ChIP-seq SE, K562 CTCF, hg38
+     - 948 MB
+     - 6.5 s, 1.2 GB / 2.7 s, 1.5 GB
+     - 25.4 s, 1.1 GB / 11.1 s, 5.2 GB
+   * - ChIP-seq PE, SK-N-SH H3K4me3, hg38
+     - 2.3 GB
+     - 11.1 s, 1.5 GB / 3.1 s, 1.8 GB
+     - 36.4 s, 1.2 GB / 14.1 s, 4.7 GB
+   * - ATAC-seq PE, HCT116, hg38
+     - 2.4 GB
+     - 12.1 s, 1.6 GB / 3.5 s, 2.0 GB
+     - 46.2 s, 1.3 GB / 14.9 s, 4.5 GB
+   * - DNase-seq PE, K562, hg38
+     - 46 MB
+     - 1.1 s, 0.25 GB / 1.0 s, 0.28 GB
+     - 8.5 s, 1.0 GB / 4.4 s, 4.4 GB
+   * - PRO-cap PE, K562, hg38
+     - 1.4 GB
+     - 6.9 s, 0.55 GB / 2.0 s, 0.67 GB
+     - 27.3 s, 1.2 GB / 8.0 s, 2.8 GB
+   * - RNA-seq PE, K562, hg38
+     - 67 MB
+     - 1.2 s, 0.18 GB / 0.9 s, 0.17 GB
+     - 8.3 s, 1.0 GB / 4.3 s, 3.4 GB
+   * - CUT&RUN PE, K562 CTCF, hg38
+     - 40 MB
+     - 1.2 s, 0.23 GB / 1.0 s, 0.22 GB
+     - 8.5 s, 1.0 GB / 4.3 s, 4.5 GB
+   * - MNase-seq PE, K562, hg38
+     - 118 MB
+     - 1.6 s, 0.34 GB / 1.1 s, 0.26 GB
+     - 9.9 s, 1.1 GB / 4.7 s, 4.0 GB
+   * - ChIP-nexus SE, mESC Nanog, mm10
+     - 1.1 GB
+     - 7.2 s, 1.4 GB / 2.7 s, 1.7 GB
+     - 26.6 s, 0.9 GB / 11.3 s, 3.7 GB
+   * - PacBio RNA long reads, K562, hg38
+     - 71 MB
+     - 1.3 s, 0.17 GB / 1.0 s, 0.22 GB
+     - 9.5 s, 1.0 GB / 4.3 s, 3.7 GB
+
+figwig is 3 to 4 times faster than deepTools on one thread and 4 to 8
+times on eight, where deepTools' processes each hold their own copy of
+the work and the small files are bound by its start-up; figwig's peak
+grows with the file (the keys of every read end, 8 bytes each) and
+deepTools' with the processes.
+
 Every file of a test-data collection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

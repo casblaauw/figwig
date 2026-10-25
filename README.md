@@ -34,6 +34,7 @@ integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
 | Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
 | Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
 | Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
+| The same BAM's per-base coverage, like deepTools | **3.4 s** at `-p 8` | 14.9 s on 8 processes, `bamCoverage --binSize 1`, the same value at every base |
 | Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
 | A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
 | 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
@@ -373,8 +374,9 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 8  # tes
 messages, except that `-p` is a number of cores, 1 unless given. By default
 it counts the 5' end of every mapped read at each base, and writes the counts
 of the two strands to two bigWigs; `-u` writes one, `-f` counts both ends of
-each fragment, `-3p` the 3' ends, `-ps`, `-ns`, `-sf` and `-r` shift and scale
-the counts, and `-z` writes zoom levels. A BAM file is inflated by libdeflate
+each fragment, `-3p` the 3' ends, `-c` every aligned base of each read (the
+coverage deepTools' `bamCoverage` gives), `-ps`, `-ns`, `-sf` and `-r` shift
+and scale the counts, and `-z` writes zoom levels. A BAM file is inflated by libdeflate
 and walked by a numba kernel on `-p` threads, and a BED/tsv file is scanned
 by a numba kernel; SAM files, `--mate_pairs`, remote files and malformed
 records go through bam2bw's own pysam or line loop, so that their result, or
@@ -389,7 +391,7 @@ files are read and shared across cores.
 <summary><b>All arguments, from <code>figwig bam2bw -h</code></b></summary>
 
 ```text
-usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p] [-ps POS_SHIFT]
+usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p | -c] [-ps POS_SHIFT]
                      [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                      [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
                      -n NAME [-z ZOOMS] [-v]
@@ -409,6 +411,14 @@ options:
   -f, --fragments       The data is fragments and so both ends should be
                         recorded.
   -3p, --three_prime    Record the 3' end of each read instead of the 5' end.
+  -c, --coverage        Count every aligned base of each read (its CIGAR's
+                        M, = and X runs, so a deletion or a skipped intron
+                        is not covered), or every base of each interval of
+                        a BED/tsv file, instead of one end: the coverage
+                        deepTools' bamCoverage gives at 1 bp bins. The
+                        shifts move the first base (-ps) and the end (-ns);
+                        a shift that empties a read leaves it uncovered.
+                        Not with --mate_pairs.
   -ps, --pos_shift POS_SHIFT
                         A shift to apply to positive strand reads.
   -ns, --neg_shift NEG_SHIFT

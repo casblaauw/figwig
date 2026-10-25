@@ -26,6 +26,7 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n sample -p 8 -f -u   # samp
 | `-n` | output prefix |
 | `-f` | count both ends of each read or interval (start and end - 1); not with `-3p` |
 | `-3p` | 3' ends instead of 5' |
+| `-c` | every aligned base of each read (CIGAR M, = and X runs; a deletion or skipped intron is not covered), or every base of a BED/tsv interval: deepTools `bamCoverage --binSize 1`, which it matched at every base on eleven experiments (ChIP-seq, ATAC, DNase, PRO-cap, RNA-seq, CUT&RUN, MNase, ChIP-nexus, PacBio RNA); written as intervals of one value; not with `-f`, `-3p`, `-mp` |
 | `-ps`, `-ns` | added to each start (`-ps`) and end (`-ns`); counting 5' ends that shifts plus-strand reads by `-ps` and minus-strand by `-ns`, with `-3p` the two swap. ATAC-seq Tn5 correction: `-ps 4 -ns -5` |
 | `-mp` | one count per read pair at a position both mates fix (PRO-seq, PRO-cap); BAM/SAM only; `--rna5 read1\|read2` picks the mate with the RNA's 5' end, `--opposite_strand` reports the other mate's strand |
 | `-sf` | multiply every count |
@@ -38,6 +39,7 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n sample -p 8 -f -u   # samp
 | DNase-seq, ChIP-seq BAM | defaults |
 | fragments file (bulk or 10x single-cell) | `-f -u`; 10x fragments are usually Tn5-shifted already |
 | PRO-seq, PRO-cap | `-mp`, with `--rna5` and `-3p` as the protocol needs |
+| read-span coverage for a browser or a pileup-style target (ChIP-seq, RNA-seq) | `-c`, with `-r` for depth normalization; a spliced read covers its exons only |
 
 ## Inputs
 
