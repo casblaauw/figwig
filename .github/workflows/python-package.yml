@@ -47,7 +47,7 @@ jobs:
 
       - name: Give each source file its last commit time
         shell: bash
-        run: for f in figwig/*.py; do touch -d "@$(git log -1 --format=%ct -- "$f")" "$f"; done
+        run: for f in figwig/*.py; do touch -t "$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H%M.%S --format=%cd -- "$f")" "$f"; done
 
       - name: Set up uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v10.2.0
@@ -76,7 +76,7 @@ jobs:
           fetch-depth: 0
 
       - name: Give each source file its last commit time
-        run: for f in figwig/*.py; do touch -d "@$(git log -1 --format=%ct -- "$f")" "$f"; done
+        run: for f in figwig/*.py; do touch -t "$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H%M.%S --format=%cd -- "$f")" "$f"; done
 
       - name: Set up uv and Python 3.10
         uses: astral-sh/setup-uv@v10.2.0
