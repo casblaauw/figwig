@@ -47,6 +47,8 @@ Writing
 
 	- ``_zoom_records``, the kernel that summarizes items into one zoom level's records, holds the open record in locals and stores it back when it returns, instead of writing it to the level's state arrays for every item. Zoom levels are summarized on different threads at once, and their small state arrays can share a cache line, which makes the kernel many times slower in the processes where the arrays happen to be allocated next to each other. The files written are unchanged. Thanks @YaoxiangLi!
 
+	- With threads, ``BigWigWriter`` plans each batch of items as data blocks on a thread of its own, encodes and compresses the blocks on the pool, and folds the batch into the file's summary in file order on another thread, so the calling thread only takes the next call's values; before, it laid every batch out itself, which was the limit with libdeflate from 8 threads on. Sorted input with valid values, the common case, is confirmed in one compiled pass instead of the masks and differences of the general checks, which now run only when that pass finds something and raise the same errors in the same order. Threaded writers take batches of 786,432 items instead of 1,048,576, so they hold less input at once. The files written are unchanged, byte for byte. Writing the benchmarks' tracks with libdeflate and no zoom levels on 8 threads takes 1.4 to 1.5 times less, other settings up to 1.2 times less, and peak memory without zoom levels falls by 3 to 12%. Thanks @YaoxiangLi!
+
 Claude Code skill
 -----------------
 

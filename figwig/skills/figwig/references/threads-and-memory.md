@@ -18,9 +18,11 @@ stable, and the last section measures the numbers where they matter.
 
 ## Writing
 
-- bigWigs: the calling thread lays out values while `n_jobs` threads
-  compress. With libdeflate the calling thread is the limit near 8 threads;
-  zlib keeps gaining to 32. Zoom levels add a pass over the data, about 4x
+- bigWigs: with `n_jobs` above 1, a planning thread lays each batch out, the
+  `n_jobs` pool threads encode and compress it, and a summary thread folds
+  it in, so the calling thread only takes the next batch; the writer runs
+  `n_jobs + 2` threads. With libdeflate gains end near 8 threads; zlib keeps
+  gaining to 32. Zoom levels add a pass over the data, about 4x
   the time of a write without them, and their memory grows with threads.
 - figwig files: whole tiles encode on the pool, partial tiles and
   intervals on the calling thread, so write windows for speed; the writer

@@ -90,7 +90,7 @@ print(BigWigReader("track.bw").read("chr2", [49_000], width=1000).shape)
 | `zooms` | 10 | `0` unless a genome browser will draw the file: building zoom levels is most of a write's time, and on sparse count tracks they can multiply the file size. |
 | `engine` | `'auto'`: libdeflate if the `deflate` package loads, else zlib | `'zlib'` for bytes identical to pyBigWig's (with `level=6`, `zooms=0`, `missing=numpy.nan`, intervals or single bases). `'isal'` is fastest at levels 1 to 3 but its bytes differ run to run at 1 and 2. |
 | `level` | 6 | 1 to write faster for a slightly larger file. |
-| `n_jobs` | 8 | threads compressing blocks beside the calling thread; `references/threads-and-memory.md`. |
+| `n_jobs` | 8 | threads encoding and compressing blocks, plus one planning each batch and one folding it into the summary, beside the calling thread; `references/threads-and-memory.md`. |
 
 The bytes do not depend on `n_jobs` or on how values are split into calls
 (except `'isal'`). Section types (fixedStep, varStep, bedGraph) are chosen

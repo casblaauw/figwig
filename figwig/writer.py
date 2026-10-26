@@ -7,19 +7,25 @@ import os
 import sys
 import zlib
 
+from typing import NamedTuple
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
 
 import numpy
 
+from ._kernels import _check_sorted_intervals
+from ._kernels import _check_sorted_windows
+from ._kernels import _copy_kept
 from ._kernels import _decode_items
 from ._kernels import _deflate_blocks_libdeflate
 from ._kernels import _deflate_blocks_zlib
+from ._kernels import _FLOAT32_MAX
+from ._kernels import _encode_blocks
 from ._kernels import _inflate_blocks
 from ._kernels import _libdeflate
 from ._kernels import _pread
-from ._kernels import _update_summary
+from ._kernels import _update_summary_blocks
 from ._kernels import _window_items
 from ._kernels import _zlib_compress
 from ._kernels import _zlib_uncompress
@@ -39,6 +45,7 @@ _BUF_SIZE = 32768
 _BEDGRAPH, _VARSTEP, _FIXEDSTEP = 1, 2, 3
 _BLOCK_ITEMS = {_BEDGRAPH: 2728, _VARSTEP: 4092, _FIXEDSTEP: 8185}
 _ITEM_WORDS = {_BEDGRAPH: 3, _VARSTEP: 2, _FIXEDSTEP: 1}
+_KIND_WORDS = numpy.array([0, 3, 2, 1], dtype=numpy.int64)
 
 # An index node has at most 64 children, and a zoom block 1023 records.
 _RTREE_BLOCK_SIZE = 64
@@ -48,6 +55,14 @@ _ZOOM_BLOCK_RECORDS = 1023
 # many small chromosomes cost a few numpy calls, and a long one does not
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
+
+# Threaded writers keep a second batch in flight, so they take smaller batches,
+# bounding the input they hold while leaving the next tasks enough work.
+_THREADED_BATCH_ITEMS = 3 << 18
+
+# The most batches being compressed at once, so that the pool has the next
+# batch to work on while this thread writes the last and takes another.
+_IN_FLIGHT = 2
 
 # Each window, or each segment of this many bases of a wider one, is written
 # as whichever section type is smallest, and a wider window is converted a
@@ -71,7 +86,6 @@ _ZOOM_COMPRESS_BLOCKS = 64
 # each zoom level reuses; the records made are copied out of it.
 _ZOOM_SCRATCH_RECORDS = 1 << 16
 
-_FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
 _DBL_MIN = sys.float_info.min
 
@@ -424,13 +438,13 @@ class _Run:
 		self.end = start
 
 	def take(self, n):
-		"""Remove the first n items, as arrays (starts, ends, values)."""
+		"""Remove the first n items, as arrays (starts, ends, values). ends is
+		None for fixedStep and varStep, whose items are each one base."""
 
-		starts = numpy.concatenate(self.starts) if self.kind != _FIXEDSTEP else \
+		starts = _joined(self.starts) if self.kind != _FIXEDSTEP else \
 			self.start + numpy.arange(self.n, dtype=numpy.int64)
-		ends = numpy.concatenate(self.ends) if self.kind == _BEDGRAPH else \
-			starts + 1
-		values = numpy.concatenate(self.values)
+		ends = _joined(self.ends) if self.kind == _BEDGRAPH else None
+		values = _joined(self.values)
 
 		if self.kind != _FIXEDSTEP:
 			self.starts = [starts[n:]]
@@ -440,7 +454,13 @@ class _Run:
 		self.values = [values[n:]]
 		self.start += n if self.kind == _FIXEDSTEP else 0
 		self.n -= n
-		return starts[:n], ends[:n], values[:n]
+		return starts[:n], None if ends is None else ends[:n], values[:n]
+
+
+def _joined(arrays):
+	"""The arrays one after another, without a copy where there is one."""
+
+	return arrays[0] if len(arrays) == 1 else numpy.concatenate(arrays)
 
 
 class BigWigWriter:
@@ -531,6 +551,8 @@ class BigWigWriter:
 		zooms: int = 10, level: int = 6, engine: str = 'auto', n_jobs: int = 8):
 		self._file = None
 		self._pool = None
+		self._planner = None
+		self._summarizer = None
 
 		self.chrom_sizes = dict(_check_chrom_sizes(chrom_sizes))
 		self._chrom_list = list(self.chrom_sizes.items())
@@ -546,6 +568,8 @@ class BigWigWriter:
 		self.zooms = int(zooms)
 		self.engine, self.level = _check_engine(engine, level)
 		self.n_jobs = _check_n_jobs(n_jobs)
+		self._batch_items = min(_BATCH_ITEMS, _THREADED_BATCH_ITEMS) if \
+			self.n_jobs > 1 else _BATCH_ITEMS
 		self.path = path
 
 		self._summary_offset = 64 + 24 * self.zooms
@@ -571,8 +595,14 @@ class BigWigWriter:
 		self._counts = numpy.zeros(2, dtype=numpy.uint64)
 		self._stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
 
+		# Batches are planned on a thread of their own, so that planning the
+		# next one does not wait behind the pool's queue of compression tasks,
+		# and the summary, which adds every item in file order, folds them in
+		# one after another on another.
 		if self.n_jobs > 1:
 			self._pool = ThreadPoolExecutor(self.n_jobs)
+			self._planner = ThreadPoolExecutor(1)
+			self._summarizer = ThreadPoolExecutor(1)
 
 	def __repr__(self):
 		return "BigWigWriter({!r})".format(os.fspath(self.path))
@@ -589,9 +619,17 @@ class BigWigWriter:
 	def _abandon(self):
 		"""Stop without finishing the file, which is left without a header."""
 
+		# The planner and summarizer submit to the pool, so they stop first.
+		for executor in (self._planner, self._summarizer):
+			if executor is not None:
+				executor.shutdown(cancel_futures=True)
+		self._planner = self._summarizer = None
 		if self._pool is not None:
 			self._pool.shutdown(cancel_futures=True)
 			self._pool = None
+		self._inflight.clear()
+		self._pending.clear()
+		self._run = None
 		if self._file is not None:
 			self._file.close()
 			self._file = None
@@ -711,45 +749,63 @@ class BigWigWriter:
 		def describe(j):
 			return "{} {} on {!r}".format(item, j, names[codes[j]])
 
-		if starts.min() < 0:
-			j = int(numpy.argmax(starts < 0))
-			raise ValueError("{} starts before 0, at {}.".format(describe(j),
-				starts[j]))
-
-		if ends is None:
-			width = values.shape[1]
-			# Compared with 2**32 - 1 - width, so that a start near 2**63 does
-			# not overflow into one that passes.
-			if starts.max() > 2**32 - 1 - width:
-				j = int(numpy.argmax(starts > 2**32 - 1 - width))
-				raise ValueError("{} ends at {}, past 2**32 - 1.".format(
-					describe(j), int(starts[j]) + width))
-
-			_check_window_values(values, starts, lengths, describe)
-		else:
-			if (ends <= starts).any():
-				j = int(numpy.argmax(ends <= starts))
-				raise ValueError("{} ends at {}, at or before its start, {}."
-					.format(describe(j), ends[j], starts[j]))
-			if (ends > lengths).any():
-				j = int(numpy.argmax(ends > lengths))
-				raise ValueError("{} ends at {}, past its length, {}.".format(
-					describe(j), ends[j], lengths[j]))
-
-			_check_interval_values(values, describe)
-
-		# Windows whose keys are each at least `width` past the last are
-		# sorted and do not overlap: on one chromosome the keys are starts,
-		# and on the next the key is more than any start plus `width`.
-		keys = starts if len(names) == 1 else (tids << 32) | starts
-		gaps = numpy.diff(keys)
-		apart = ends is None and bool((gaps >= width).all())
-
+		width = values.shape[1] if ends is None else 0
 		order = None
-		if not apart and (gaps < 0).any():
-			order = numpy.argsort(keys, kind='stable')
-			tids, starts = tids[order], starts[order]
-			ends = None if ends is None else ends[order]
+		# Most calls are already in file order, with valid values. One compiled
+		# pass confirms that without the masks and differences of the general
+		# checks below, which then run only when it finds something: they raise
+		# the same errors in the same order, sort, and take the dtypes it does
+		# not.
+		apart = False
+		if values.dtype.isnative and (values.dtype.kind in 'biu' or
+				values.dtype in (numpy.dtype('float32'), numpy.dtype('float64'))):
+			if ends is None:
+				# For wider float32 windows numpy's vectorized check for infinities
+				# is faster; float64 also needs a range check, which pays to fuse.
+				if width == 1 or values.dtype == numpy.float64:
+					apart = _check_sorted_windows(tids, starts, lengths, values) == -1
+			else:
+				apart = _check_sorted_intervals(tids, starts, ends, lengths,
+					values) == -1
+
+		if not apart:
+			if starts.min() < 0:
+				j = int(numpy.argmax(starts < 0))
+				raise ValueError("{} starts before 0, at {}.".format(describe(j),
+					starts[j]))
+
+			if ends is None:
+				# Compared with 2**32 - 1 - width, so that a start near 2**63 does
+				# not overflow into one that passes.
+				if starts.max() > 2**32 - 1 - width:
+					j = int(numpy.argmax(starts > 2**32 - 1 - width))
+					raise ValueError("{} ends at {}, past 2**32 - 1.".format(
+						describe(j), int(starts[j]) + width))
+
+				_check_window_values(values, starts, lengths, describe)
+			else:
+				if (ends <= starts).any():
+					j = int(numpy.argmax(ends <= starts))
+					raise ValueError("{} ends at {}, at or before its start, {}."
+						.format(describe(j), ends[j], starts[j]))
+				if (ends > lengths).any():
+					j = int(numpy.argmax(ends > lengths))
+					raise ValueError("{} ends at {}, past its length, {}.".format(
+						describe(j), ends[j], lengths[j]))
+
+				_check_interval_values(values, describe)
+
+			# Windows whose keys are each at least `width` past the last are
+			# sorted and do not overlap: on one chromosome the keys are starts,
+			# and on the next the key is more than any start plus `width`.
+			keys = starts if len(names) == 1 else (tids << 32) | starts
+			gaps = numpy.diff(keys)
+			apart = ends is None and bool((gaps >= width).all())
+
+			if not apart and (gaps < 0).any():
+				order = numpy.argsort(keys, kind='stable')
+				tids, starts = tids[order], starts[order]
+				ends = None if ends is None else ends[order]
 
 		if tids[0] < self._last_tid:
 			raise ValueError("chromosome {!r} is written after {!r}, but comes "
@@ -788,7 +844,7 @@ class BigWigWriter:
 		fewest bytes."""
 
 		width = values.shape[1]
-		for a, b, c0, c1 in _pieces(*values.shape):
+		for a, b, c0, c1 in _pieces(*values.shape, self._batch_items):
 			rows = slice(a, b) if order is None else order[a:b]
 			block = numpy.ascontiguousarray(values[rows, c0:c1],
 				dtype=numpy.float32)
@@ -836,8 +892,8 @@ class BigWigWriter:
 		those whose value is `missing` or NaN."""
 
 		n = len(starts)
-		for a in range(0, n, _BATCH_ITEMS):
-			b = min(n, a + _BATCH_ITEMS)
+		for a in range(0, n, self._batch_items):
+			b = min(n, a + self._batch_items)
 			rows = slice(a, b) if order is None else order[a:b]
 			self._append_items(_BEDGRAPH, tids[a:b], starts[a:b], ends[a:b],
 				numpy.ascontiguousarray(values[rows], dtype=numpy.float32), missing)
@@ -848,37 +904,39 @@ class BigWigWriter:
 		each chromosome, leaving out those whose value is `missing` or NaN.
 		Without `ends`, each item is one base."""
 
-		keep = ~numpy.isnan(values)
-		if not numpy.isnan(missing):
-			keep &= values != missing
-
 		# The runs hold these until they are laid out, so they are copies
-		# rather than views of what the caller may change.
-		every = bool(keep.all())
-		s = starts.copy() if every else starts[keep]
-		v = values.copy() if every else values[keep]
-		e = s + 1 if ends is None else ends.copy() if every else ends[keep]
-		if len(s) == 0:
+		# rather than views of what the caller may change, made with the items
+		# left out in one pass. Where every item is on one chromosome, `tids`
+		# is that id broadcast, with a stride of 0, and is one run.
+		n = len(values)
+		one = tids.strides[0] == 0
+		t = numpy.empty(0 if one else n, dtype=numpy.int64)
+		s = numpy.empty(n, dtype=numpy.int64)
+		e = numpy.empty(0 if ends is None else n, dtype=numpy.int64)
+		v = numpy.empty(n, dtype=numpy.float32)
+		n = _copy_kept(t if one else tids, starts, starts if ends is None else
+			ends, values, numpy.float32(missing), t, s, e, v)
+		if n == 0:
 			return
 
-		# Where every item is on one chromosome, `tids` is that id broadcast,
-		# with a stride of 0, and is one run.
-		if tids.strides[0] == 0:
-			bounds, run_tids = [0, len(s)], [int(tids[0])]
+		s, v = s[:n], v[:n]
+		e = None if ends is None else e[:n]
+		if one:
+			bounds, run_tids = [0, n], [int(tids[0])]
 		else:
-			t = tids if every else tids[keep]
-			bounds = [0] + (numpy.flatnonzero(t[1:] != t[:-1]) + 1).tolist() + [
-				len(s)]
+			t = t[:n]
+			bounds = [0] + (numpy.flatnonzero(t[1:] != t[:-1]) + 1).tolist() + [n]
 			run_tids = t[bounds[:-1]].tolist()
 
 		for tid, r0, r1 in zip(run_tids, bounds[:-1], bounds[1:]):
-			self._append(kind, tid, int(s[r0]), s[r0:r1], e[r0:r1], v[r0:r1])
+			self._append(kind, tid, int(s[r0]), s[r0:r1], None if e is None else
+				e[r0:r1], v[r0:r1])
 
 	def _flush_if_full(self):
 		"""Lay out and compress what has been added once it is a batch."""
 
 		if self._pending_n + (self._run.n if self._run is not None else 0) >= \
-				_BATCH_ITEMS:
+				self._batch_items:
 			self._flush(final=False)
 
 	def _positions(self, positions, name):
@@ -915,7 +973,12 @@ class BigWigWriter:
 
 		run.values.append(values)
 		run.n += len(values)
-		run.end = first + len(values) if kind == _FIXEDSTEP else int(ends[-1])
+		if kind == _FIXEDSTEP:
+			run.end = first + len(values)
+		elif kind == _BEDGRAPH:
+			run.end = int(ends[-1])
+		else:
+			run.end = int(starts[-1]) + 1
 
 	def _flush(self, final):
 		"""Lay out and compress the pending runs and, unless this is the final
@@ -940,37 +1003,68 @@ class BigWigWriter:
 		if len(runs) > 0:
 			self._submit(runs)
 
-		self._write(len(self._inflight) - (0 if final or self._pool is None else 1))
+		self._write(len(self._inflight) - (0 if final or self._pool is None else
+			_IN_FLIGHT - 1))
 
 	def _submit(self, runs):
-		"""Lay one batch of runs out as data blocks, fold it into the summary,
-		and compress it, on the pool when there is one."""
+		"""Plan one batch of runs as data blocks, encode and compress them, and
+		fold them into the summary. With a pool, none of it runs here, so that
+		this thread is free to take the next batch: the planning thread plans
+		the batch and starts the pool's tasks that encode and compress it, and
+		the summary thread folds in each batch's plan in turn."""
 
-		words, bounds, blocks, spans, values = _layout(runs)
-		_update_summary(spans, values, self._counts, self._stats)
-		self._sizes.append(numpy.diff(bounds))
-
-		data = words.view(numpy.uint8)
 		if self._pool is None:
-			parts = [_compress_blocks(self.engine, self.level, data, bounds)]
-		else:
-			# Contiguous shares of about equal bytes, one per thread.
-			cuts = numpy.searchsorted(bounds[1:], bounds[-1] * numpy.arange(1,
-				self.n_jobs) / self.n_jobs).tolist()
-			parts = []
-			for a, b in zip([0] + cuts, cuts + [blocks.size]):
-				if b > a:
-					parts.append(self._pool.submit(_compress_blocks, self.engine,
-						self.level, data[bounds[a]:bounds[b]], bounds[a:b + 1] -
-						bounds[a]))
+			plan = _plan(runs)
+			self._fold_in(plan)
+			parts = [_encode_and_compress(self.engine, self.level, plan, 0,
+				plan.blocks.size)]
+			self._inflight.append((_Done((plan, parts)), None))
+			return
 
-		self._inflight.append((parts, blocks))
+		planned = self._planner.submit(self._plan_and_start, runs)
+		summarized = self._summarizer.submit(self._summarize, planned)
+		self._inflight.append((planned, summarized))
+
+	def _plan_and_start(self, runs):
+		"""Plan a batch, and start encoding and compressing it in contiguous
+		shares of about equal bytes, one per thread. Returns the plan and the
+		shares' futures, without waiting for them."""
+
+		plan = _plan(runs)
+		offsets = plan.offsets
+		cuts = numpy.searchsorted(offsets[1:], offsets[-1] * numpy.arange(1,
+			self.n_jobs) / self.n_jobs).tolist()
+
+		parts = []
+		for a, b in zip([0] + cuts, cuts + [plan.blocks.size]):
+			if b > a:
+				parts.append(self._pool.submit(_encode_and_compress, self.engine,
+					self.level, plan, a, b))
+
+		return plan, parts
+
+	def _summarize(self, planned):
+		"""Fold a batch in once it has been planned."""
+
+		self._fold_in(planned.result()[0])
+
+	def _fold_in(self, plan):
+		"""Fold a batch into the summary. Batches come here in file order."""
+
+		_update_summary_blocks(plan.kinds, plan.firsts, plan.n_items, plan.starts,
+			plan.ends, plan.values, self._counts, self._stats)
 
 	def _write(self, n_batches):
 		"""Write the first `n_batches` batches in flight, in order, waiting for
 		them to be compressed."""
 
-		for parts, blocks in self._inflight[:n_batches]:
+		for planned, summarized in self._inflight[:n_batches]:
+			plan, parts = planned.result()
+			if summarized is not None:
+				summarized.result()
+			blocks = plan.blocks
+			self._sizes.append(4 * numpy.diff(plan.offsets))
+
 			offset = self._file.tell()
 			sizes = []
 			for part in parts:
@@ -1198,17 +1292,19 @@ class _Done:
 		return True
 
 
-def _pieces(n, width):
-	"""Windows' values in pieces of about _BATCH_ITEMS values, as (first
+def _pieces(n, width, batch_items=None):
+	"""Windows' values in pieces of about `batch_items` values, as (first
 	window, end window, first column, end column): several whole windows at
 	a time, or one window wider than _SEGMENT_BASES in whole segments."""
 
+	if batch_items is None:
+		batch_items = _BATCH_ITEMS
 	if width <= _SEGMENT_BASES:
-		step = max(1, _BATCH_ITEMS // width)
+		step = max(1, batch_items // width)
 		for a in range(0, n, step):
 			yield a, min(n, a + step), 0, width
 	else:
-		step = max(1, _BATCH_ITEMS // _SEGMENT_BASES) * _SEGMENT_BASES
+		step = max(1, batch_items // _SEGMENT_BASES) * _SEGMENT_BASES
 		for j in range(n):
 			for c in range(0, width, step):
 				yield j, j + 1, c, min(width, c + step)
@@ -1229,7 +1325,7 @@ def _check_float32(block, describe, first):
 			"infinite value.".format(describe(j)))
 
 	if block.dtype.itemsize > 4:
-		outside = numpy.abs(block) > _FLT_MAX
+		outside = numpy.abs(block) > _FLOAT32_MAX
 		if outside.any():
 			j = first + int(numpy.argmax(outside.reshape(len(block), -1).any(
 				axis=1)))
@@ -1264,26 +1360,47 @@ def _check_interval_values(values, describe):
 		_check_float32(values[a:a + _BATCH_ITEMS], describe, a)
 
 
-def _layout(runs):
-	"""Lay runs of items out as data blocks, each one section.
+class _Plan(NamedTuple):
+	"""A batch of runs laid out as data blocks, each one section. For each
+	block: its section type, chromosome id, first item and number of items;
+	the offset of each block in 32-bit words, and of their end; every item's
+	start, end and float32 value in file order, where only bedGraph items
+	read `ends`; and an index entry for each block, without its offset and
+	size. The words themselves are written by `_encode_and_compress`."""
 
-	`runs` are (kind, chromosome id, starts, ends, values), in file order.
-	A run is cut into blocks of as many items as fit, the last of which may
-	be short. Returns the blocks' 32-bit words, back to back; the byte offset
-	of each block in them and of their end; an index entry for each block,
-	without its offset and size; and every item's span and value in file
-	order, for the total summary.
-	"""
+	kinds: numpy.ndarray
+	tids: numpy.ndarray
+	firsts: numpy.ndarray
+	n_items: numpy.ndarray
+	offsets: numpy.ndarray
+	starts: numpy.ndarray
+	ends: numpy.ndarray
+	values: numpy.ndarray
+	blocks: numpy.ndarray
 
-	kinds = numpy.array([run[0] for run in runs])
+
+def _plan(runs):
+	"""Plan runs of items, (kind, chromosome id, starts, ends, values) in file
+	order, as a `_Plan`. A run is cut into blocks of as many items as fit,
+	the last of which may be short."""
+
+	kinds = numpy.array([run[0] for run in runs], dtype=numpy.int64)
 	tids = numpy.array([run[1] for run in runs], dtype=numpy.int64)
 	counts = numpy.array([len(run[4]) for run in runs], dtype=numpy.int64)
-	capacity = numpy.array([_BLOCK_ITEMS[kind] for kind in kinds],
+	capacity = numpy.array([_BLOCK_ITEMS[kind] for kind in kinds.tolist()],
 		dtype=numpy.int64)
 
-	starts = numpy.concatenate([run[2] for run in runs])
-	ends = numpy.concatenate([run[3] for run in runs])
-	values = numpy.concatenate([run[4] for run in runs])
+	# A batch is often a single run, whose arrays are used as they are. Only
+	# bedGraph items have ends; the starts stand in for the others' ends,
+	# which are never read.
+	if len(runs) == 1:
+		starts, ends, values = runs[0][2:]
+		ends = starts if ends is None else ends
+	else:
+		starts = numpy.concatenate([run[2] for run in runs])
+		ends = numpy.concatenate([run[2] if run[3] is None else run[3] for run in
+			runs])
+		values = numpy.concatenate([run[4] for run in runs])
 
 	run_blocks = -(-counts // capacity)
 	n_blocks = int(run_blocks.sum())
@@ -1295,57 +1412,36 @@ def _layout(runs):
 	n_items = numpy.minimum(first + capacity[block_run], (run_first +
 		counts)[block_run]) - first
 	block_kinds = kinds[block_run]
+	block_tids = tids[block_run]
 
-	# A fixedStep block of n items ends n bases after its start, the end of
-	# its last item, as for the other types.
-	headers = numpy.zeros((n_blocks, 6), dtype='<u4')
-	headers[:, 0] = tids[block_run]
-	headers[:, 1] = starts[first]
-	headers[:, 2] = ends[first + n_items - 1]
-	headers[:, 3] = block_kinds == _FIXEDSTEP
-	headers[:, 4] = block_kinds != _BEDGRAPH
-	headers[:, 5] = block_kinds | (n_items << 16)
-
-	# The items' words, in groups of consecutive runs of the same type.
-	item_words = []
-	group_starts = numpy.flatnonzero(numpy.diff(kinds, prepend=-1))
-	for g, a in enumerate(group_starts):
-		b = group_starts[g + 1] if g + 1 < len(group_starts) else len(runs)
-		lo, hi = run_first[a], run_first[b - 1] + counts[b - 1]
-
-		kind = kinds[a]
-		words = numpy.empty((hi - lo, _ITEM_WORDS[kind]), dtype='<u4')
-		if kind == _FIXEDSTEP:
-			words[:, 0] = values[lo:hi].view('<u4')
-		else:
-			words[:, 0] = starts[lo:hi]
-			words[:, -1] = values[lo:hi].view('<u4')
-			if kind == _BEDGRAPH:
-				words[:, 1] = ends[lo:hi]
-
-		item_words.append(words.ravel())
-
-	block_words = 6 + numpy.array([_ITEM_WORDS[kind] for kind in block_kinds],
-		dtype=numpy.int64) * n_items
-	block_offsets = numpy.cumsum(block_words) - block_words
-	header_slots = (block_offsets[:, None] + numpy.arange(6)).ravel()
-
-	words = numpy.empty(int(block_words.sum()), dtype='<u4')
-	is_item = numpy.ones(words.size, dtype=bool)
-	is_item[header_slots] = False
-	words[header_slots] = headers.ravel()
-	words[is_item] = numpy.concatenate(item_words)
-
-	bounds = 4 * numpy.concatenate([[0], numpy.cumsum(block_words)])
+	block_words = 6 + _KIND_WORDS[block_kinds] * n_items
+	offsets = numpy.concatenate([[0], numpy.cumsum(block_words)])
 
 	blocks = numpy.zeros(n_blocks, dtype=_LEAF_ITEM)
-	blocks['start_tid'] = headers[:, 0]
-	blocks['start'] = headers[:, 1]
-	blocks['end_tid'] = headers[:, 0]
-	blocks['end'] = headers[:, 2]
+	blocks['start_tid'] = block_tids
+	blocks['start'] = starts[first]
+	blocks['end_tid'] = block_tids
+	last = first + n_items - 1
+	blocks['end'] = numpy.where(block_kinds == _BEDGRAPH, ends[last],
+		starts[last] + 1)
 
-	spans = (ends - starts).astype(numpy.uint32)
-	return words, bounds, blocks, spans, values
+	return _Plan(block_kinds, block_tids, first, n_items, offsets, starts, ends,
+		values, blocks)
+
+
+def _encode_and_compress(engine, level, plan, a, b):
+	"""Write blocks a to b of a `_Plan` as words and compress each, as
+	`_compress_blocks` does. Several threads can do this at once on the
+	blocks of one batch."""
+
+	offsets = plan.offsets
+	words = numpy.empty(int(offsets[b] - offsets[a]), dtype='<u4')
+	_encode_blocks(plan.kinds[a:b], plan.tids[a:b], plan.firsts[a:b],
+		plan.n_items[a:b], offsets[a:b] - offsets[a], plan.starts, plan.ends,
+		plan.values.view('<u4'), words)
+
+	return _compress_blocks(engine, level, words.view(numpy.uint8), 4 * (
+		offsets[a:b + 1] - offsets[a]))
 
 
 def _read_items(fd, blocks, lengths):
@@ -1443,8 +1539,8 @@ class _ZoomLevel:
 		floats = numpy.concatenate([self.pending_floats] + [f for _, f in records])
 
 		n = len(ints) if final else len(ints) - len(ints) % _ZOOM_BLOCK_RECORDS
-		self.pending_ints = ints[n:]
-		self.pending_floats = floats[n:]
+		self.pending_ints = ints[n:].copy()
+		self.pending_floats = floats[n:].copy()
 		return ints[:n], floats[:n]
 
 
