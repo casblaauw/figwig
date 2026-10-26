@@ -65,6 +65,12 @@ Claude Code skill
 	- The skill covers figwig files, in ``references/figwig-reading.md``, ``figwig-writing.md`` and ``converters.md``, and ``references/recipes.md`` walks through whole jobs: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip and reads as tracks. The router routes by task and by symptom to the operation to use, every error message is in ``references/errors.md``, and the machine-bound timings are gone in favour of the rules they supported and a snippet to measure with. Re-run ``figwig install-skill --force`` to pick up the new skill.
 
 
+Tests
+-----
+
+	- The test suite runs in a quarter of the time: ``figwig bam2bw``'s tests run the command in the test process rather than one subprocess each, which cost a second of imports per test, the damage test flips every 61st byte of the chunks rather than every fifth (the header, tables and index keep every fifth), and ``pytest-xdist`` is in the dev extra for ``uv run pytest -n 8``. CI keeps numba's cache between runs, keyed on the hash of the four files that hold kernels with no fallback, since numba does not notice a change to a constant or kernel used from another file, and runs the tests on every core of the runner: a job that compiled every kernel specialization from scratch, which was most of its time, now does so only for a commit that touches a kernel file.
+
+
 Version 0.1.0
 =============
 

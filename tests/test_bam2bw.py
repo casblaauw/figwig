@@ -1,11 +1,15 @@
 # test_bam2bw.py
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
+import io
 import os
 import gzip
 import shutil
 import subprocess
 import sys
+import traceback
+import warnings
+import contextlib
 import importlib.util
 
 import numpy
@@ -23,6 +27,7 @@ import pysam  # noqa: E402
 import pyBigWig  # noqa: E402
 
 import figwig  # noqa: E402
+import figwig.__main__  # noqa: E402
 import figwig.bam2bw  # noqa: E402
 
 from .reads import write_bam  # noqa: E402
@@ -159,9 +164,51 @@ def tsv_gz(data_dir):
 ## Running the tool
 
 
+class Finished:
+	"""What `subprocess.run` hands back, from a command run in this process."""
+
+	def __init__(self, returncode, stdout, stderr):
+		self.returncode = returncode
+		self.stdout = stdout
+		self.stderr = stderr
+
+
+def run_in_process(argv):
+	"""`python -m figwig <argv>` without the process: the command's stdout,
+	stderr and exit code, with a message printed and a traceback written as
+	the interpreter would, and warnings printed as a fresh interpreter prints
+	them rather than raised as the test configuration raises them. A
+	subprocess per test cost a second of imports each, most of this file's
+	time; the command-line entry itself is covered by the tests that run
+	`BAM2BW` through `subprocess`."""
+
+	out, err = io.StringIO(), io.StringIO()
+	with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+			warnings.catch_warnings(record=True) as caught:
+		warnings.simplefilter("always")
+		try:
+			figwig.__main__.main(argv, fast_exit=False)
+			code = 0
+		except SystemExit as e:
+			code = e.code
+			if code is None:
+				code = 0
+			elif not isinstance(code, int):
+				print(code, file=err)
+				code = 1
+		except BaseException:
+			traceback.print_exc(file=err)
+			code = 1
+	for w in caught:
+		err.write(warnings.formatwarning(w.message, w.category, w.filename,
+			w.lineno))
+	return Finished(code, out.getvalue(), err.getvalue())
+
+
 @pytest.fixture
 def run(tmp_path):
-	"""Run `figwig bam2bw` in a scratch directory and hand back the finished process.
+	"""Run `figwig bam2bw` in this process, in a scratch directory, and hand
+	back what looks like the finished process (`run_in_process`).
 
 	The `-n` prefix is supplied automatically and points into this test's own
 	`tmp_path`, so tests never name output files and never collide. Nothing is
@@ -170,10 +217,10 @@ def run(tmp_path):
 	"""
 
 	def _run(*args, name="out"):
-		command = BAM2BW + [str(arg) for arg in args]
-		command += ["-n", str(tmp_path / name)]
+		argv = ["bam2bw"] + [str(arg) for arg in args]
+		argv += ["-n", str(tmp_path / name)]
 
-		return subprocess.run(command, capture_output=True, text=True, env=ENV)
+		return run_in_process(argv)
 
 	return _run
 

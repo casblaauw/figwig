@@ -1,6 +1,19 @@
 # Runs the unit tests with uv on Linux, macOS and Windows across the supported
 # Python versions, once more with the oldest numpy and numba that
 # pyproject.toml allows, and checks ruff and the documentation build.
+#
+# The tests compile a few hundred numba kernel specializations, which from
+# scratch is most of a job's time, so each job keeps numba's cache between
+# runs. numba invalidates a cached kernel when its own source file changes
+# (by hash from 0.61, by mtime and size before, which the checkout sets to
+# each file's last commit time) and not when a kernel or constant it uses
+# from another file changes, so the key is the hash of every file that
+# holds a kernel, with no fallback: a commit that touches one of them
+# compiles everything from scratch, as before this cache. numba also keys an
+# entry by the CPU it compiled for, and the runners of one OS come with
+# several, so the kernels are compiled for a generic CPU (NUMBA_CPU_NAME),
+# which any runner can load. The tests run on every core of the runner
+# (pytest-xdist).
 
 name: Python package
 
@@ -28,33 +41,61 @@ jobs:
       # pybigtools 0.2.5, the reference reader, has no wheel for Python 3.14,
       # and its pyo3 builds for 3.14 only through the stable ABI.
       PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+      NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
+      NUMBA_CPU_NAME: generic
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Give each source file its last commit time
+        shell: bash
+        run: for f in figwig/*.py; do touch -t "$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H%M.%S --format=%cd -- "$f")" "$f"; done
 
       - name: Set up uv and Python ${{ matrix.python-version }}
         uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Keep numba's cache between runs
+        uses: actions/cache@v4
+        with:
+          path: .numba_cache
+          key: numba-generic-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
+
       - name: Install dependencies
         run: uv sync --extra dev
 
       - name: Test with pytest
-        run: uv run pytest
+        run: uv run pytest -n auto
 
   lowest-dependencies:
     runs-on: ubuntu-latest
+    env:
+      NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
+      NUMBA_CPU_NAME: generic
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Give each source file its last commit time
+        run: for f in figwig/*.py; do touch -t "$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H%M.%S --format=%cd -- "$f")" "$f"; done
 
       - name: Set up uv and Python 3.10
         uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: "3.10"
 
+      - name: Keep numba's cache between runs
+        uses: actions/cache@v4
+        with:
+          path: .numba_cache
+          key: numba-generic-lowest-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
+
       - name: Test with the lowest direct dependencies
-        run: uv run --isolated --resolution lowest-direct --extra dev pytest
+        run: uv run --isolated --resolution lowest-direct --extra dev pytest -n auto
 
   lint-and-docs:
     runs-on: ubuntu-latest
