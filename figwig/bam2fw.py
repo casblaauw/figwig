@@ -426,6 +426,9 @@ def main(argv=None, prog='figwig bam2fw'):
 		if not args.force:
 			_refuse_existing(args.name + '.fw', '--force')
 		_check_filenames(args)
+		for filename in args.filename:
+			if not os.path.isfile(filename):
+				raise ValueError("{} is not a file.".format(filename))
 		chrom_sizes = read_chrom_sizes(args.sizes)
 		cores = _cores(args.parallel)
 		if args.barcode_column is None:
@@ -442,7 +445,12 @@ def main(argv=None, prog='figwig bam2fw'):
 		import multiprocessing
 		tqdm.set_lock(multiprocessing.RLock())
 
-	reads = read_files(args, chrom_sizes, cores)
+	# pysam raises for a file that is not a BAM, or is cut short, as the
+	# scanners do for a bad fragments file: a message, not a traceback.
+	try:
+		reads = read_files(args, chrom_sizes, cores)
+	except (ValueError, TypeError, OSError) as e:
+		raise _exit(prog, e)
 	if args.verbose:
 		print("\n" * len(args.filename))
 

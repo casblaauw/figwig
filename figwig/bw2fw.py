@@ -123,7 +123,8 @@ def _shared_chrom_sizes(readers, sizes=None):
 	agree with the bigWigs on the length of every chromosome they share,
 	or every chromosome of the bigWigs in order of first appearance, which
 	must agree on each one's length. A chromosome of a bigWig that the sizes
-	file leaves out is named in a warning, since its values are dropped."""
+	file leaves out is named in a warning, since its values are dropped; a
+	bigWig that shares no chromosome with the sizes file is an error."""
 
 	if sizes is not None:
 		if isinstance(sizes, (str, os.PathLike)):
@@ -134,6 +135,7 @@ def _shared_chrom_sizes(readers, sizes=None):
 		lengths = dict(chrom_sizes)
 		dropped = []
 		for reader in readers:
+			shared = 0
 			for name, length in reader.chrom_sizes.items():
 				if name not in lengths:
 					dropped.append(name)
@@ -141,6 +143,17 @@ def _shared_chrom_sizes(readers, sizes=None):
 					raise ValueError("{} gives {} a length of {}, but the sizes "
 						"file gives it {}; the bigWigs and the sizes must be on one "
 						"assembly.".format(reader.path, name, length, lengths[name]))
+				else:
+					shared += 1
+			# A bigWig that shares no chromosome with the sizes would have
+			# every value dropped: a naming or assembly mismatch, not a choice.
+			if shared == 0:
+				raise ValueError("none of the chromosomes of {} is in the sizes "
+					"file: it has {}{} and the sizes have {}{}; the bigWigs and the "
+					"sizes must be on one assembly, with the same names.".format(
+					reader.path, ", ".join(list(reader.chrom_sizes)[:3]), ", ..."
+					if len(reader.chrom_sizes) > 3 else "", ", ".join(list(lengths)[
+					:3]), ", ..." if len(lengths) > 3 else ""))
 		if dropped:
 			dropped = sorted(set(dropped))
 			warnings.warn("{} chromosome{} of the bigWigs {} not in the sizes "

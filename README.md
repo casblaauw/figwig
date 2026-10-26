@@ -126,6 +126,16 @@ tracks and the time to a CUDA tensor.
 The format is specified byte by byte, with a Kaitai Struct definition and a
 reference reader, on [the format page](https://figwig.readthedocs.io/en/latest/format.html).
 
+The format is built for count, pileup, single-cell and other sparse or
+integer tracks read many at a time, where it is a fifth of the bigWigs'
+size and reads faster. A dense float track read in short windows, such
+as conservation or fold change, is not: at the default tile of 16,384
+bases every 2 kb window decodes a whole tile of every track in its group,
+and such a file reads slower than the bigWigs. Convert those with
+`figwig bw2fw -t 1024 --groups 1`, which the
+[converters page](https://figwig.readthedocs.io/en/latest/converters.html)
+explains, or keep them as bigWigs.
+
 
 | format | 6 tracks | 48 tracks | 512 tracks |
 |---|---|---|---|
@@ -359,7 +369,10 @@ narrowest type that holds it exactly: six genome-wide count tracks that take
 and `fw.chrom_sizes` say what a file holds, as `figwig info` does from the
 shell. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
 guide covers the format, its layout, the API, the converters and the first
-read's compile time.
+read's compile time: the first read of each kind in a new environment
+compiles its kernels, 15 to 30 s each with nothing printed meanwhile, and
+numba caches them beside the package, so on a cluster whose install is
+read-only set `NUMBA_CACHE_DIR` to a writable directory.
 
 The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
 and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides

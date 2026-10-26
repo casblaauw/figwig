@@ -105,6 +105,24 @@ def test_read_matches_pybigtools_at_chromosome_edges(dense_bw, batching):
 	assert_identical(X, reference(path, names, starts, 1000))
 
 
+def test_bigwig_without_data_reads_as_missing(tmp_path):
+	"""A bigWig whose header points to no data index, as BigWigWriter
+	writes for a track with no values, opens and reads every window as
+	`missing`, with no warning, since its chromosomes are there."""
+
+	path = tmp_path / 'empty.bw'
+	with figwig.BigWigWriter(path, {'chr1': 1000, 'chr2': 500}):
+		pass
+	reader = BigWigReader(path)
+	assert reader.chrom_sizes == {'chr1': 1000, 'chr2': 500}
+	y = reader.read(['chr1', 'chr2'], [0, 490], 20, missing=7.0)
+	assert y.shape == (2, 20) and (y[0] == 7).all() and (y[1, :10] == 7).all()
+	assert numpy.isnan(y[1, 10:]).all()
+	assert (read_bigwig([path, path], 'chr1', [5], 3) == 0).all()
+	with pytest.warns(UserWarning, match='chromosomes not in'):
+		assert (reader.read('absent', [0], 4, missing=1) == 1).all()
+
+
 def test_past_chromosome_end_is_nan(dense_bw):
 	path, chroms = dense_bw
 	length = chroms['chrM']

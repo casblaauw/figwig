@@ -229,9 +229,19 @@ class BigWigReader:
 		blocks whose entry ends a few bases past the block's last interval,
 		into the next block's range, though no two intervals overlap.
 		`_read_windows` checks the intervals themselves.
+
+		A file whose header points to no data index, at offset 0, holds no
+		data: `BigWigWriter` writes one for a track with no values, as
+		`fw2bw` does for an empty track, and every window of it reads as
+		`missing`.
 		"""
 
 		error = "The data index of {} cannot be read".format(self.path)
+		if self._data_index == 0:
+			empty = numpy.zeros(0, dtype=numpy.int64)
+			return {'starts': empty, 'ends': empty, 'chroms': empty, 'bases':
+				numpy.zeros((0, 2), dtype=numpy.int64), 'offsets': empty,
+				'sizes': empty}
 		try:
 			with open(self.path, 'rb') as handle:
 				fd = handle.fileno()
