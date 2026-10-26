@@ -200,7 +200,7 @@ pip install "figwig[cuda]"
 git clone https://github.com/jmschrei/figwig.git
 cd figwig
 uv sync --extra dev
-uv run pytest
+uv run pytest -n 8    # the tests on 8 cores; the first run compiles the kernels
 ```
 
 ## Claude Code Skill

@@ -63,14 +63,18 @@ def _parser():
 	return parser
 
 
-def main(argv=None):
+def main(argv=None, fast_exit=True):
+	"""The `figwig` command. `fast_exit` lets `figwig bam2bw` leave through
+	`os._exit` once its output is flushed, as the command does; the tests
+	run it in their own process and pass False."""
+
 	try:
-		_main(argv)
+		_main(argv, fast_exit)
 	except KeyboardInterrupt:
 		raise SystemExit(130)
 
 
-def _main(argv=None):
+def _main(argv=None, fast_exit=True):
 	argv = sys.argv[1:] if argv is None else list(argv)
 
 	# A command's own arguments are parsed by the command, so that its usage
@@ -94,7 +98,7 @@ def _main(argv=None):
 						os.path.isfile(f)], bam2bw.read_chrom_sizes(args.sizes)):
 					print("figwig bam2bw: warning: {}".format(problem),
 						file=sys.stderr)
-			bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=True)
+			bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=fast_exit)
 		except (ValueError, TypeError, OSError) as e:
 			raise SystemExit("figwig bam2bw: {}".format(e))
 		return

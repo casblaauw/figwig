@@ -123,7 +123,14 @@ def test_damage_anywhere_is_refused_or_invisible(tmp_path, level):
 	good = reader.read(*windows, 70, dtype='float64', n_jobs=1)
 	damaged = str(tmp_path / 'damaged.fw')
 	outcomes = {'refused': 0, 'same': 0}
-	for offset in range(0, len(intact), 5):
+	# Every fifth byte of the header, the tables and the index, where each
+	# byte is part of some field, and every 61st byte of the chunks between
+	# them, which the CRC-32 and the codec guard alike; every fifth byte of
+	# the chunks was 16,000 flips and 25 s for the compressed file.
+	tables_at = reader._tables_at
+	offsets = (list(range(0, 128, 5)) + list(range(128, tables_at, 61))
+		+ list(range(tables_at, len(intact), 5)))
+	for offset in offsets:
 		data = bytearray(intact)
 		data[offset] ^= 1 << int(rng.integers(0, 8))
 		with open(damaged, 'wb') as handle:
