@@ -216,6 +216,27 @@ def test_missing_input_fails(tmp_path):
 		main(['bw2fw', '-o', str(tmp_path / 'out.fw'), str(tmp_path / 'no.bw')])
 
 
+def test_sizes_sharing_no_chromosome_are_refused(tmp_path, bigwigs):
+	"""A sizes file with none of a bigWig's chromosomes, another assembly's
+	or names without the chr prefix, would drop every value: an error that
+	names both sides, not an empty file with a warning."""
+
+	sizes = tmp_path / 'other.sizes'
+	sizes.write_text('chrZ\t1000\n1\t2000\n')
+	with pytest.raises(SystemExit, match="none of the chromosomes of .* is in "
+			"the sizes file: it has chr1.*and the sizes have chrZ, 1"):
+		main(['bw2fw', '-o', str(tmp_path / 'out.fw'), '-s', str(sizes),
+			bigwigs[0]])
+	assert not (tmp_path / 'out.fw').exists()
+	# One shared chromosome is enough: the rest are dropped with a warning.
+	sizes.write_text('chr1\t{}\nchrZ\t1000\n'.format(CHROM_SIZES['chr1']))
+	with pytest.warns(UserWarning, match='not in the sizes file'):
+		main(['bw2fw', '-o', str(tmp_path / 'one.fw'), '-s', str(sizes),
+			bigwigs[0]])
+	assert list(FigWigReader(str(tmp_path / 'one.fw')).chrom_sizes) == ['chr1',
+		'chrZ']
+
+
 def test_bad_arguments_fail_cleanly(tmp_path, bigwigs):
 	with pytest.raises(SystemExit, match="power of two"):
 		main(['bw2fw', '-o', str(tmp_path / 'out.fw'), '-t', '100', bigwigs[0]])

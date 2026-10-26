@@ -355,6 +355,23 @@ def test_requires_sizes(run, bam):
 	assert "-s/--sizes" in process.stderr
 
 
+def test_bad_bam_is_a_message(tmp_path, bam, sizes, run):
+	"""An input that is not a BAM, or is cut short, exits 1 with pysam's
+	message on stderr and no traceback."""
+
+	fake = tmp_path / "fake.bam"
+	fake.write_text("not a bam\n")
+	process = run(fake, "-s", sizes)
+	assert process.returncode == 1
+	assert "figwig bam2bw: " in process.stderr and "alignment data" in \
+		process.stderr
+	assert "Traceback" not in process.stderr
+	with open(bam, "rb") as handle:
+		fake.write_bytes(handle.read(os.path.getsize(bam) - 40))
+	process = run(fake, "-s", sizes)
+	assert process.returncode == 1 and "Traceback" not in process.stderr
+
+
 def test_requires_name(bam, sizes):
 	# The -n prefix is supplied by the `run` fixture, so this one test has to
 	# build the command itself in order to leave it out.

@@ -75,7 +75,13 @@ def _main(argv=None):
 	# and errors are its own.
 	if len(argv) > 0 and argv[0] == 'bam2bw':
 		from . import bam2bw
-		bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=True)
+		# bam2bw's reader raises for an input that is not a BAM, is cut
+		# short or cannot be opened, through pysam: a message, not a
+		# traceback, as the other commands print.
+		try:
+			bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=True)
+		except (ValueError, TypeError, OSError) as e:
+			raise SystemExit("figwig bam2bw: {}".format(e))
 		return
 	if len(argv) > 0 and argv[0] == 'bam2fw':
 		from . import bam2fw

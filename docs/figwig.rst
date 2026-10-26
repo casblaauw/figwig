@@ -647,7 +647,8 @@ specification is tested against the files this package writes by a reader
 written from it alone, and comes with a Kaitai Struct definition for other
 languages. In short: a file is a 128-byte header, the chunks or blocks as
 they were written, the chromosome table, a table of each track's sum,
-nonzero bases, minimum and maximum, the metadata as a JSON document, and
+nonzero bases, and minimum and maximum over its nonzero bases, the metadata
+as a JSON document, and
 the index; every integer is little-endian, and every structure is found by
 an offset, so a file appended to in place keeps its old tables and index
 as unused bytes between its chunks.

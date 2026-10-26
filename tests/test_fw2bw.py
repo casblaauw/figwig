@@ -55,10 +55,17 @@ def test_every_track_becomes_a_bigwig(tmp_path, fw):
 			y = read_bigwig(path, chrom, [0], length)[0]
 			numpy.testing.assert_array_equal(y, expected_bigwig(ref, chrom, i))
 
-	# A track without values gives a bigWig without data blocks, whose header
-	# and chromosomes read, as pyBigWig writes one.
-	assert BigWigReader(str(tmp_path / 'bw' / 'empty.bw')).chrom_sizes == \
+	# A track without values gives a bigWig without data blocks, as pyBigWig
+	# writes one, which reads as missing everywhere and converts back to an
+	# empty track.
+	empty = str(tmp_path / 'bw' / 'empty.bw')
+	assert BigWigReader(empty).chrom_sizes == CHROM_SIZES
+	assert (read_bigwig(empty, 'chr1', [0, 50], 100) == 0).all()
+	main(['bw2fw', empty, '-o', str(tmp_path / 'empty.fw')])
+	back = FigWigReader(str(tmp_path / 'empty.fw'))
+	assert back.stats['nonzero'].tolist() == [0] and back.chrom_sizes == \
 		CHROM_SIZES
+	assert (back.read('chr1', [0], CHROM_SIZES['chr1']) == 0).all()
 
 	with open(tmp_path / 'bw' / 'reference.tsv') as handle:
 		lines = handle.read().splitlines()

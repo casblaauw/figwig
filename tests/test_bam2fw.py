@@ -212,6 +212,18 @@ def test_errors(tmp_path, bam, sizes):
 		bam2fw(tmp_path, [bam], sizes, "--dtype", "uint8", "-sf", "200")
 	with pytest.raises(SystemExit, match="No such file|not a file|cannot"):
 		bam2fw(tmp_path, [bam], str(tmp_path / "none.sizes"))
+	# An input that is not a BAM, or is cut short, is pysam's message, not
+	# its traceback; a path that does not exist is said to be none.
+	fake = tmp_path / "fake.bam"
+	fake.write_text("not a bam\n")
+	with pytest.raises(SystemExit, match="does not contain alignment data"):
+		bam2fw(tmp_path, [str(fake)], sizes)
+	with open(bam, "rb") as handle:
+		fake.write_bytes(handle.read(os.path.getsize(bam) - 40))
+	with pytest.raises(SystemExit, match="truncated|cut short|EOF"):
+		bam2fw(tmp_path, [str(fake)], sizes)
+	with pytest.raises(SystemExit, match="none.bam is not a file"):
+		bam2fw(tmp_path, [str(tmp_path / "none.bam")], sizes)
 	path = bam2fw(tmp_path, [bam], sizes)
 	with pytest.raises(SystemExit, match="exists; --force writes over it"):
 		bam2fw(tmp_path, [bam], sizes)
