@@ -43,13 +43,18 @@ the last. The format uses varints only for offsets within a tile and
 differences between them, which are below 2**16, so a varint takes at most
 three bytes, and a reader may refuse a longer one.
 
-A *CRC-32* is the cyclic redundancy check of IEEE 802.3 as ``zlib.crc32``
-and the ``cksum``-less ``crc32`` tools compute it: polynomial 0xEDB88320
-in reflected form, initial value 0xFFFFFFFF, final complement. A *zlib
-stream* is RFC 1950: a two-byte header, RFC 1951 DEFLATE data at any
-compression level, and the Adler-32 of the uncompressed bytes, which a
-reader checks by inflating to the end of the stream. A stream with bytes
-after its end is invalid.
+A *CRC-32* is the cyclic redundancy check of gzip, PNG and
+``zlib.crc32``: polynomial 0xEDB88320 in reflected form, initial value
+0xFFFFFFFF, final complement. A *zlib stream* is RFC 1950: a two-byte
+header, RFC 1951 DEFLATE data at any compression level, and the Adler-32
+of the uncompressed bytes, which a reader checks by inflating to the end
+of the stream. A stream with bytes after its end is invalid.
+
+Multi-byte values inside a chunk are aligned to 4 bytes at most: a sparse
+or matrix chunk's values follow padding to 4, so an ``f8`` or ``u8``
+there may lie on an address that is not a multiple of 8, and a reader in
+a language that cares must copy or use unaligned loads. A dense chunk's
+values start at the chunk's first byte.
 
 A *tile* is ``tile`` consecutive bases of one chromosome, where ``tile``
 is the header's, a power of two from 16 to 65,536. Chromosome *c* of
@@ -81,11 +86,11 @@ ends as the writer lays them out, and ``tables_crc`` covers the bytes from
 it reads any of them.
 
 Every structure below is found through an offset in the header or the
-index, never by scanning, so a file that was appended to in place holds its
-earlier tables and index as unused bytes inside the data region. A reader
-must not assume that the chunks are contiguous, that they are in tile
-order in the file, that a chunk starts on any alignment, or that the data
-region ends where the chromosome table starts.
+index, never by scanning, and the data region may hold bytes nothing
+points to (see "Appending and merging"). A reader must not assume that
+the chunks are contiguous, that they are in tile order in the file, that
+a chunk starts on any alignment, or that the data region ends where the
+chromosome table starts.
 
 The header
 ----------
@@ -94,7 +99,7 @@ The header
    :header-rows: 1
    :widths: 6 20 6 68
 
-   * - at
+   * - offset
      - field
      - type
      - meaning
@@ -145,7 +150,7 @@ The header
    * - 40
      - ``tracks``
      - u8
-     - offset of the statistics table
+     - offset of the statistics table, which has one record per track
    * - 48
      - ``index``
      - u8
@@ -224,12 +229,15 @@ The statistics table
      - the bases whose value is neither 0 nor NaN
    * - ``min``
      - f8
-     - the smallest value over every base that is not NaN, including the implicit 0 of bases without a value, so never above 0
+     - the smallest value over the bases whose value is neither 0 nor NaN
    * - ``max``
      - f8
-     - the largest, likewise never below 0
+     - the largest, likewise
 
-A track with no nonzero base has ``min`` and ``max`` 0. The writer
+A track with no nonzero base has ``min`` and ``max`` 0, and a track whose
+every nonzero value is positive has a positive ``min``: the 0 of a base
+without a value, which the format cannot tell from a written 0, is no part
+of either. The writer
 accumulates ``sum`` with Neumaier's compensated summation, so its last
 bits may differ between writers, and between writes of the same values in
 different calls; a reader must not use it as an identity. The table ends
@@ -249,7 +257,7 @@ of the file's metadata as it was, so other software may add its own.
    * - key
      - value
    * - ``tracks``
-     - a list of ``n_tracks`` objects in track order, each with ``name``, a non-empty string distinct among the tracks; ``dtype``, one of ``uint8``, ``uint16``, ``uint32``, ``int8``, ``int16``, ``int32``, ``float32``, ``float64``, the type the track's values are read as; ``group``, an integer from 0 to ``n_groups - 1``; and any other keys, the track's attributes
+     - a list of ``n_tracks`` objects in track order, each with ``name``, a non-empty string distinct among the tracks; ``dtype``, one of ``uint8``, ``uint16``, ``uint32``, ``int8``, ``int16``, ``int32``, ``float32``, ``float64``; ``group``, an integer from 0 to ``n_groups - 1``; and any other keys, the track's attributes
    * - ``attributes``
      - an object, the file's attributes
    * - ``genome``
@@ -266,6 +274,15 @@ one track; in track order every group holds exactly one, and the writer
 numbers them so that track *t* is group *t*. A reader refuses a metadata
 that is not an object, whose ``attributes`` is not an object, or whose
 ``tracks`` does not describe ``n_tracks`` tracks as above.
+
+A track's ``dtype`` is the type a reader presents its values in, and
+every value stored for the track is exactly representable in it: an
+integer type holds no fraction and no NaN, ``float32`` holds binary32
+values. The element type of a chunk (below) is the storage type of one
+tile for every track of the group, chosen per tile, and may be narrower
+or wider than a track's ``dtype``: a ``uint8`` track's tile may lie in a
+``u1`` chunk, in an ``f8`` chunk when a ``float64`` track of the group has
+a value in the tile, or in a *one* chunk; the values are the same in any.
 
 The writer serializes the object with Python's ``json.dumps(document,
 allow_nan=False)``: keys in insertion order, the five keys above after any
@@ -322,9 +339,9 @@ listed holds only zeros in every track of the group. For a listed tile,
 the chunk's bytes in the file; ``raw`` its bytes once decoded, a multiple
 of 8; and ``crc`` the CRC-32 of its ``size`` bytes as they lie in the
 file. ``size`` and ``raw`` are nonzero, equal when the codec is 0 or the
-kind byte's stored bit is set, and ``raw`` is at most ``8 * tracks * tile
-+ 16 * tracks + 64`` for a group of ``tracks`` tracks, the largest a chunk
-of the group can be.
+kind byte's stored bit is set; ``raw`` is at most ``8 * tracks * tile +
+16 * tracks + 64`` for a group of ``tracks`` tracks, the largest a chunk
+of the group can be, and ``size`` at most that plus 64.
 
 A run covers the tiles ``first`` to ``last`` inclusive: its chunks are
 those of the live tiles in that range, in tile order, each starting where
@@ -336,6 +353,14 @@ may cover tiles that are not live, which take no bytes. The writer makes a
 new run each time a group's chunks stop being contiguous in the file,
 which happens when another group's chunks are written in between, so a
 group written in one stretch has one run.
+
+To find the chunk of tile *T* of a group, then: search the live tiles for
+*T* (they are sorted); if it is absent the tile is zeros; otherwise, with
+*k* its index among the live tiles, find the run with ``first <= T <=
+last``, let *k0* be the index of the first live tile at or above the run's
+``first``, and the chunk lies at ``offset + sum(size[k0:k])`` for
+``size[k]`` bytes. A reader that reads many tiles computes every live
+tile's offset once by walking the runs in turn, as the package's does.
 
 A track-order record
 ~~~~~~~~~~~~~~~~~~~~
@@ -369,17 +394,23 @@ The summary
 ~~~~~~~~~~~
 
 Either record continues with the group's summary: ``n_sum`` (u4),
-``n_sum_bytes`` (u4), and a zlib stream of ``n_sum_bytes`` bytes inflating
+``n_sum_bytes`` (u4), ``crc`` (u4, the CRC-32 of the stream's
+``n_sum_bytes`` bytes), and a zlib stream of ``n_sum_bytes`` bytes inflating
 to ``n_sum * (4 + 4 * tracks)`` bytes: the numbers of ``n_sum`` tiles (u4
 each, ascending, all below the genome's tile count), then for each of those
 tiles in turn the sum of each of the group's tracks over the tile (f4,
 ``tracks`` of them per tile). A tile's sum of a track is the sum of the
 track's values over the tile's bases that are not NaN, rounded to f4; the
 listed tiles are those where at least one track's sum is not 0. The
-writer keeps summaries while ``n_tracks * n_tiles * 4`` is at most 2**28
-bytes, and otherwise writes ``n_sum`` 0 and ``n_sum_bytes`` 0 for every
+writer adds a tile's values in binary64 in base order and rounds once,
+or, for a tile written in several calls, adds the calls' f4 sums in
+binary64 and rounds again; another writer's sums may differ in the last
+bit, and a reader must not expect to reproduce them. The writer keeps
+summaries while ``n_tracks * n_tiles * 4`` is at most 2**28 bytes, and
+otherwise writes ``n_sum`` 0, ``n_sum_bytes`` 0 and ``crc`` 0 for every
 group, which a reader must accept as "no summary". A group with a summary
-and no listed tile has ``n_sum`` 0 and a stream of nothing.
+and no listed tile has ``n_sum`` 0 and a zlib stream of no bytes (8 bytes
+long, with its CRC-32).
 
 The zoom section
 ~~~~~~~~~~~~~~~~
@@ -414,10 +445,13 @@ levels, level *k* counted from 1:
 Bins are numbered over the genome as tiles are: a chromosome of *t* tiles
 has ``ceil(t / factor)`` bins, each of ``factor`` consecutive tiles of that
 chromosome, so no bin crosses a chromosome, and a chromosome's bins follow
-the bins of the chromosomes before it. A bin's sum of a track is the sum of
-the f4 tile sums of the summary over the bin's tiles, in f8; the listed
-bins are those that hold a listed tile. A file written without zoom levels
-has ``n_zooms`` 0, and a group without a summary has no levels either.
+the bins of the chromosomes before it. With chromosomes of 5 and 2 tiles,
+level 1 (``factor`` 4) has bins 0 and 1 for tiles 0-3 and 4 of the first
+chromosome and bin 2 for tiles 5-6 of the second; level 2 (``factor`` 16)
+has bins 0 and 1. A bin's sum of a track is the sum of the f4 tile sums
+of the summary over the bin's tiles, in f8; the listed bins are those that
+hold a listed tile. A file written without zoom levels has ``n_zooms`` 0,
+and a group without a summary has no levels either.
 
 Chunks
 ------
@@ -441,17 +475,26 @@ A chunk's or block's *kind byte* has three fields:
      - stored: in a codec 1 file, the chunk's bytes are its decoded bytes, not a zlib stream; never set in a codec 0 file or on a block
 
 Kind 0 is never written in a live entry: a tile of zeros is left out of
-the live list. The element type is the type of every stored value of the
-chunk, for all of its tracks; *one* stores no values, every nonzero base
-having the value 1, and is only used by sparse and matrix chunks. A reader
-refuses a kind above 4, a code above 8, a dense or runs chunk with the one
-code, and a block whose kind is not 1.
+the live list, and the writer never writes a live chunk whose values are
+all 0, though a reader accepts one. The element type is the type of every
+stored value of the chunk, for all of its tracks; *one* stores no values,
+every nonzero base having the value 1, and is only used by sparse and
+matrix chunks. A reader refuses a kind above 4, a code above 8, a dense
+or runs chunk with the one code, and a block whose kind is not 1.
 
 Bytes in the file
 ~~~~~~~~~~~~~~~~~
 
 A chunk's *decoded bytes* are its payload, as laid out below, padded to 8
-bytes; their length is the live entry's ``raw``. In a codec 0 file the
+bytes; their length is the live entry's ``raw``, which is therefore, with
+``pad4`` and ``pad8`` rounding up to a multiple of 4 and 8:
+
+- dense: ``pad8(tracks * tile * w)``;
+- sparse and runs: ``pad8(pad4(4 + 4 * tracks + sum(lengths)) + total * w)``;
+- matrix: ``pad8(pad4(8 + 8 * n_present + 2 * total) + total * w)``;
+- a block: ``pad8(pad8(4 * n) + n * w)``.
+
+In a codec 0 file the
 chunk lies in the file as those bytes. In a codec 1 file it lies as one
 zlib stream of them, unless the writer found the stream no shorter than
 the bytes, in which case the chunk lies as its decoded bytes and its kind
@@ -488,9 +531,9 @@ The nonzero bases of each track, with their values:
    * - ``lengths`` (``tracks`` u4)
      - for each track in slot order, the bytes its offsets take below; 0 for a track with no nonzero base
    * - offsets
-     - for each track in slot order, its nonzero offsets ascending, the first as a varint, each later one as a varint of its difference from the one before; a track's offsets take exactly ``lengths[slot]`` bytes, and the number of its bases is the number of its bytes whose high bit is clear
+     - for each track in slot order, back to back with nothing between tracks, its nonzero offsets strictly ascending, the first as a varint, each later one as a varint of its difference from the one before; a track's offsets take exactly ``lengths[slot]`` bytes, and the number of its bases is the number of its bytes whose high bit is clear
    * - padding
-     - to a multiple of 4 bytes from the chunk's start
+     - to a multiple of 4 bytes, counted from the first byte of the chunk
    * - values
      - ``total`` values of the element type, each track's in turn, in the order of its offsets; none for the one code
 
@@ -502,14 +545,15 @@ Runs, kind 4
 ~~~~~~~~~~~~
 
 The same layout as sparse, with another meaning: a track's offsets are the
-bases where its value changes, ascending, and its values the value from
-each of those bases up to the next change, or to the end of the tile. A
-track's value is 0 before its first change, so a track that starts the
-tile with a nonzero value has its first offset at 0, and a run that returns
-to 0 is a change whose value is 0, so a runs chunk's values include zeros
-and never use the one code. ``total`` is the number of changes over every
-track, and two consecutive changes of a track have different values, NaN
-counting as one value.
+bases where its value changes, strictly ascending, and its values the
+value from each of those bases up to the next change, or to the end of
+the tile. A track's value is 0 before its first change, so its first
+change has a nonzero value, a track that starts the tile with a nonzero
+value has its first offset at 0, and a run that returns to 0 is a change
+whose value is 0, so a runs chunk's values include zeros and never use the
+one code. ``total`` is the number of changes over every track, and two
+consecutive changes of a track have different values, NaN counting as one
+value. A reader need not check the values; a writer must not repeat one.
 
 Matrix, kind 3
 ~~~~~~~~~~~~~~
@@ -525,13 +569,13 @@ For a group of many tracks of which few have a value in the tile:
    * - ``n_present`` (u4)
      - tracks with a nonzero base in the tile, at most ``tracks``
    * - ``present`` (``n_present`` u4)
-     - their slots, ascending
+     - their slots, strictly ascending
    * - ``ptr`` (``n_present + 1`` u4)
-     - ``ptr[j]`` is the index of present track *j*'s first entry below, ``ptr[0]`` is 0, ``ptr[n_present]`` is the number of entries in all, and the pointers do not decrease
+     - ``ptr[j]`` is the index of present track *j*'s first entry below, ``ptr[0]`` is 0, ``ptr[n_present]`` is the number of entries in all, and the pointers do not decrease; the writer lists only tracks with an entry, and a reader accepts a present track with none
    * - offsets (u2 each)
-     - ``ptr[n_present]`` offsets, those of each present track in turn, ascending within a track
+     - ``ptr[n_present]`` offsets, those of each present track in turn, strictly ascending within a track
    * - padding
-     - to a multiple of 4 bytes from the chunk's start
+     - to a multiple of 4 bytes, counted from the first byte of the chunk
    * - values
      - ``ptr[n_present]`` values of the element type, in the order of the offsets; none for the one code
 
@@ -629,9 +673,8 @@ A reader of version 1:
 - checks the chromosome table, the statistics table's extent, the
   metadata's JSON and its track records, and the directory's extent;
 - checks each group's record against its CRC-32 before using its runs,
-  live tiles or blocks, and each zoom stream against its CRC-32; the
-  summary stream has no CRC-32 of its own and is checked by its zlib
-  checksum and its inflated length;
+  live tiles or blocks, and each summary and zoom stream against its
+  CRC-32;
 - checks every count and size against ``length`` before reading or
   allocating by it, and that every zlib stream inflates to exactly the
   length the format implies, with no bytes left over;
@@ -640,11 +683,13 @@ A reader of version 1:
   do not add up;
 - checks the CRC-32 of a stored chunk inside a codec 1 file on every read;
 - checks a chunk's payload as it decodes it: the kind and code, the length
-  against what the kind implies, each track's varints filling exactly its
-  ``lengths`` bytes and adding up to ``total``, offsets ascending and below
-  ``tile``, matrix slots ascending and in range with pointers in range, and
-  a block's positions ascending and matching its record's ``first`` and
-  ``last``;
+  against the formula of "Bytes in the file" (at least that long), each
+  track's varints filling exactly its ``lengths`` bytes and adding up to
+  ``total``, offsets below ``tile`` (the package's reader checks that
+  sparse offsets ascend only through their sum staying below ``tile``,
+  and matrix offsets strictly), matrix slots ascending and in range with
+  pointers in range, and a block's positions strictly ascending and
+  matching its record's ``first`` and ``last``;
 - treats every failure as a corrupt or unsupported file, never as a value.
 
 A reader may skip the check of a track's varints it does not read, since
@@ -679,10 +724,10 @@ hexadecimal.
      64  ce 00 00 00 00 00 00 00                          metadata 206
      72  84 00 00 00 00 00 00 00                          metadata_length 132
      80  00 00 00 00 00 00 00 00                          zooms 0
-     88  c7 01 00 00 00 00 00 00                          length 455
+     88  cb 01 00 00 00 00 00 00                          length 459
      96  00 00 00 00                                      required 0
     100  01 00 00 00                                      optional 1
-    104  da 96 e6 b8                                      header_crc
+    104  68 84 ff c5                                      header_crc
     108  00 .. 00                                         20 bytes of padding
     128  01 00 00 00  01 00 00 00  03 00 00 00  02 00 00 00
            chunk of tile 0, kind byte 0x02 (sparse, u1): total 1; lengths [1];
@@ -692,7 +737,7 @@ hexadecimal.
            the varint 1 (base 17 is offset 1 of tile 1); padding; no values
     160  04 00  63 68 72 31  14 00 00 00 00 00 00 00      chromosome table: "chr1", 20
     174  00 00 00 00 00 00 08 40  02 00 00 00 00 00 00 00  statistics: sum 3.0, nonzero 2,
-         00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 40  min 0.0, max 2.0
+         00 00 00 00 00 00 f0 3f  00 00 00 00 00 00 00 40  min 1.0, max 2.0
     206  7b 22 66 69 67 77 69 67 22 3a 20 22 30 2e 31 2e 30 22 ...
            {"figwig": "0.1.0", "genome": null, "attributes": {}, "order":
            "positions", "tracks": [{"name": "a", "dtype": "uint8", "group": 0}]}
@@ -708,10 +753,56 @@ hexadecimal.
            10 00 00 00  10 00 00 00    sizes 16, 16
            10 00 00 00  10 00 00 00    raws 16, 16
            c3 59 f0 fd  35 96 dc 15    crcs
-    423  02 00 00 00  14 00 00 00                         summary: n_sum 2, n_sum_bytes 20
-    431  78 9c 63 60 60 60 60 64 00 03 07 06 86 06 7b 00 02 9b 01 01
+    423  02 00 00 00  14 00 00 00  59 8e 00 d9            summary: n_sum 2, n_sum_bytes 20, crc
+    435  78 9c 63 60 60 60 60 64 00 03 07 06 86 06 7b 00 02 9b 01 01
            the summary stream, inflating to:
            00 00 00 00  01 00 00 00    tiles 0, 1
            00 00 00 40  00 00 80 3f    sums 2.0, 1.0
-    451  00 00 00 00                                      zoom section: n_zooms 0
-    455                                                   length
+    455  00 00 00 00                                      zoom section: n_zooms 0
+    459                                                   length
+
+Appendix: three chunks
+----------------------
+
+The decoded bytes of one chunk of each remaining kind, from a tile of 64
+bases (16 for the dense one), as ``figwig``'s writer produces them; the
+sparse kind is in the file above.
+
+A dense ``u2`` chunk, kind byte 0x09, of one track whose values are 0,
+100, 200, ... 1500 over a tile of 16: the 16 values and nothing else,
+32 bytes:
+
+.. code-block:: text
+
+    00 00 64 00 c8 00 2c 01 90 01 f4 01 58 02 bc 02 20 03 84 03 e8 03 4c 04 b0 04 14 05 78 05 dc 05
+
+A runs ``f4`` chunk, kind byte 0x34, of two tracks over a tile of 64: the
+first is 3 on every base, the second 2.5 on bases 10-19 and 40-49, 40
+bytes:
+
+.. code-block:: text
+
+    05 00 00 00              total: 5 changes
+    01 00 00 00 04 00 00 00  lengths: track 0's varints take 1 byte, track 1's 4
+    00                       track 0: a change at 0
+    0a 0a 14 0a              track 1: changes at 10, 20, 40, 50 (deltas 10, 10, 20, 10)
+    00 00 00                 padding to 4
+    00 00 40 40              3.0, the value of track 0 from base 0
+    00 00 20 40 00 00 00 00  2.5 from base 10, 0 from base 20,
+    00 00 20 40 00 00 00 00  2.5 from base 40, 0 from base 50
+    00 00 00 00              padding to 8
+
+A matrix ``u1`` chunk, kind byte 0x03, of a group of 32 tracks in a codec 0
+file, of which slot 5 has the values 7 at base 3 and 9 at base 44, and
+slot 20 the value 2 at base 63, 40 bytes:
+
+.. code-block:: text
+
+    02 00 00 00              n_present: 2
+    05 00 00 00 14 00 00 00  present slots 5 and 20
+    00 00 00 00 02 00 00 00 03 00 00 00
+                             ptr: slot 5's entries are 0 and 1, slot 20's is 2, 3 in all
+    03 00 2c 00 3f 00        offsets 3, 44, 63 as u2
+    00 00                    padding to 4
+    07 09 02                 the values
+    00 00 00 00 00           padding to 8

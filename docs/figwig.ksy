@@ -347,6 +347,9 @@ types:
       - id: len_stream
         type: u4
         doc: 0 when the file keeps no summary for the group.
+      - id: crc
+        type: u4
+        doc: CRC-32 of the stream.
       - id: stream
         size: len_stream
         process: zlib

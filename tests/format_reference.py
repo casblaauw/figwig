@@ -291,12 +291,14 @@ class File:
 			self._check_live(group, n_tracks)
 			at = stream_at + n_bytes
 
-		n_sum, n_bytes = struct.unpack_from('<II', data, at)
-		at += 8
+		n_sum, n_bytes, crc = struct.unpack_from('<III', data, at)
+		at += 12
 		if at + n_bytes > header.length:
 			raise FormatError("the file ends inside a group's summary.")
 		if n_sum > self.n_tiles:
 			raise FormatError("a summary lists more tiles than the genome has.")
+		if zlib.crc32(data[at:at + n_bytes]) != crc:
+			raise FormatError("a summary does not match its CRC-32.")
 		if n_bytes > 0:
 			raw = inflate(data[at:at + n_bytes], n_sum * (4 + 4 * n_tracks))
 			tiles = numpy.frombuffer(raw, dtype='<u4', count=n_sum).astype(

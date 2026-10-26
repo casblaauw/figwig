@@ -132,6 +132,17 @@ def test_every_kind_and_element_type_is_covered(files):
 	assert codes_seen == set(range(9))
 	assert stored == {True, False}
 	assert max(runs_per_group) > 1
+	# More than one element type per kind, and matrix chunks in both codecs.
+	by_kind = {}
+	for kind, code in seen:
+		by_kind.setdefault(kind, set()).add(code)
+	assert len(by_kind[spec.KIND_DENSE]) > 1 and len(by_kind[spec.KIND_RUNS]) > 1
+	assert spec.CODE_ONE in by_kind[spec.KIND_MATRIX] and 0 in by_kind[
+		spec.KIND_MATRIX]
+	for name in ['zlib', 'stored']:
+		file = spec.File(files[name])
+		assert spec.KIND_MATRIX in {int(k & 7) for group in file.groups for k in
+			group.live['kind']}
 
 	blocks = spec.File(files['blocks'])
 	assert len(blocks.groups[0].blocks) > 1
@@ -272,10 +283,10 @@ def _summary_stream_at(file, g):
 	n_runs = len(file.groups[g].runs)
 	at += n_runs * 32
 	n_live, n_bytes = struct.unpack_from('<II', file.bytes, at)
-	return at + 8 + n_bytes + 8
+	return at + 8 + n_bytes + 12
 
 
 def _zoom_stream_at(file, g):
 	at = _summary_stream_at(file, g)
-	n_sum, n_bytes = struct.unpack_from('<II', file.bytes, at - 8)
+	n_sum, n_bytes = struct.unpack_from('<II', file.bytes, at - 12)
 	return at + n_bytes + 4 + 16

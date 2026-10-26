@@ -13,7 +13,7 @@ from figwig import FigWigWriter
 
 CHROMS = {'chr1': 300, 'chr2': 100, 'chr3': 64}
 TILE = 64
-N_CELLS = 40
+N_CELLS = 600
 
 
 def values_of(length, rng):
@@ -35,20 +35,29 @@ def values_of(length, rng):
 	v[10, 11] = 0.5
 	v[11, ::3] = rng.normal(size=(length + 2) // 3).astype(numpy.float32)
 	v[11, 7] = numpy.nan                            # float32 with NaN
-	# track 12, 'empty', stays empty
-	for c in range(N_CELLS):                        # matrix: few of many
-		v[13 + c, (c * 11) % length] = c % 3 + 1
+	v[12, :] = rng.integers(256, 65536, length)     # dense uint16
+	v[13, 5:60] = 3                                 # runs, uint8
+	# track 14, 'empty', stays empty
+	# Two groups of many cells of which few have a value in a tile, which
+	# a matrix chunk holds; in a compressed file sparse chunks win unless
+	# the group is large, so the cells are many and few are present.
+	for c in range(0, N_CELLS, 150):                # matrix, uint8
+		v[15 + c, (c * 11) % length] = c // 150 + 1
+	for c in range(0, N_CELLS, 150):                # matrix with the one code
+		v[15 + N_CELLS + c, (c * 7) % length] = 1
 	return v
 
 
 NAMED = ['ones', 'random', 'random2', 'runs', 'runs2', 'neg8', 'neg16',
 	'neg32', 'u16', 'u32', {'name': 'wide', 'dtype': 'float64'}, {'name':
-	'signal', 'dtype': 'float32', 'assay': 'ATAC'}, 'empty'] + [{'name':
-	'cell{}'.format(c), 'cell': c} for c in range(N_CELLS)]
+	'signal', 'dtype': 'float32', 'assay': 'ATAC'}, 'dense16', 'runs_int',
+	'empty'] + [{'name': 'cell{}'.format(c), 'cell': c} for c in range(
+	N_CELLS)] + [{'name': 'site{}'.format(c)} for c in range(N_CELLS)]
 TRACKS = NAMED
 GROUPS = [['ones'], ['random', 'random2'], ['runs', 'runs2'], ['neg8'],
-	['neg16'], ['neg32'], ['u16'], ['u32'], ['wide', 'signal'], ['empty'],
-	['cell{}'.format(c) for c in range(N_CELLS)]]
+	['neg16'], ['neg32'], ['u16'], ['u32'], ['wide', 'signal'], ['dense16'],
+	['runs_int'], ['empty'], ['cell{}'.format(c) for c in range(N_CELLS)],
+	['site{}'.format(c) for c in range(N_CELLS)]]
 
 
 def write(path, level=6, zooms=2, order='positions', interleave=True):

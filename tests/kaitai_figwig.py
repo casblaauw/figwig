@@ -704,6 +704,7 @@ class Figwig(KaitaiStruct):
 		def _read(self):
 			self.n_sum = self._io.read_u4le()
 			self.len_stream = self._io.read_u4le()
+			self.crc = self._io.read_u4le()
 			if self.len_stream > 0:
 				self._raw__raw_stream = self._io.read_bytes(self.len_stream)
 				self._raw_stream = zlib.decompress(self._raw__raw_stream)
