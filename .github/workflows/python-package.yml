@@ -9,8 +9,11 @@
 # each file's last commit time) and not when a kernel or constant it uses
 # from another file changes, so the key is the hash of every file that
 # holds a kernel, with no fallback: a commit that touches one of them
-# compiles everything from scratch, as before this cache. The tests run on
-# every core of the runner (pytest-xdist).
+# compiles everything from scratch, as before this cache. numba also keys an
+# entry by the CPU it compiled for, and the runners of one OS come with
+# several, so the kernels are compiled for a generic CPU (NUMBA_CPU_NAME),
+# which any runner can load. The tests run on every core of the runner
+# (pytest-xdist).
 
 name: Python package
 
@@ -39,6 +42,7 @@ jobs:
       # and its pyo3 builds for 3.14 only through the stable ABI.
       PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
       NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
+      NUMBA_CPU_NAME: generic
 
     steps:
       - uses: actions/checkout@v7
@@ -58,7 +62,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .numba_cache
-          key: numba-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
+          key: numba-generic-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
 
       - name: Install dependencies
         run: uv sync --extra dev
@@ -70,6 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NUMBA_CACHE_DIR: ${{ github.workspace }}/.numba_cache
+      NUMBA_CPU_NAME: generic
     steps:
       - uses: actions/checkout@v7
         with:
@@ -87,7 +92,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .numba_cache
-          key: numba-lowest-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
+          key: numba-generic-lowest-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
 
       - name: Test with the lowest direct dependencies
         run: uv run --isolated --resolution lowest-direct --extra dev pytest -n auto
