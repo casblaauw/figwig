@@ -70,6 +70,7 @@ writes nothing; writers stay usable.
 | `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
 | `none of the chromosomes of x.bw is in the sizes file: it has chr1, chr2, ... and the sizes have 1, 2, ...` | `bw2fw -s` with another assembly's sizes, or names without `chr` → a sizes file naming the bigWig's chromosomes |
 | `figwig bam2fw: file does not contain alignment data`, `no BGZF EOF marker; file may be truncated`, `x.bam is not a file.` | the input is not a BAM, is cut short, or the path is wrong |
+| `x.bam aligns to a chr1 of 249,250,621 bases, but the sizes give it 248,956,422: the reads and the sizes must be on one assembly`, `none of the chromosomes of x.bam is in the sizes` | `-s` is another assembly's sizes (hg19 reads, hg38 sizes) or another naming's → the assembly the BAM was aligned to |
 | `the dense output would take ... GiB` | → `sparse=True`, `labels=`, fewer windows or `out=` |
 | `a sum lies outside what ... holds`, `has values from ... to ..., which uint8 does not hold`, `pass dtype= to read as another type` | `dtype=` or `out=` too narrow or of another type |
 | `is not one of the file's chromosomes, 'chr1', ...` | the file holds only the chromosomes it was written with |

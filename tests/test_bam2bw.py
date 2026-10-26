@@ -372,6 +372,23 @@ def test_bad_bam_is_a_message(tmp_path, bam, sizes, run):
 	assert process.returncode == 1 and "Traceback" not in process.stderr
 
 
+def test_bam_header_is_checked_against_the_sizes(tmp_path, bam, run):
+	"""figwig bam2bw refuses sizes that disagree with the BAM's header on a
+	chromosome's length, or share no chromosome with it, before reading."""
+
+	other = tmp_path / "other.sizes"
+	other.write_text("chr1\t1001\nchr2\t500\n")
+	process = run(bam, "-s", other)
+	assert process.returncode == 1
+	assert "figwig bam2bw: " in process.stderr and "one assembly" in \
+		process.stderr and "Traceback" not in process.stderr
+	renamed = tmp_path / "renamed.sizes"
+	renamed.write_text("1\t1000\n2\t500\n")
+	process = run(bam, "-s", renamed)
+	assert process.returncode == 1 and "none of the chromosomes" in \
+		process.stderr
+
+
 def test_requires_name(bam, sizes):
 	# The -n prefix is supplied by the `run` fixture, so this one test has to
 	# build the command itself in order to leave it out.

@@ -406,6 +406,44 @@ def _cells_main(args, prog, cores, chrom_sizes):
 		raise _exit(prog, e)
 
 
+def _check_bam_headers(filenames, chrom_sizes):
+	"""Compare each BAM or SAM file's header with the sizes: a chromosome
+	they share must have one length, and a file must share at least one,
+	since the sizes name the assembly the counts are placed on and the file
+	the one its reads were aligned to. A file whose header names no
+	chromosome, as one of unmapped reads may, is left to the reader.
+
+	An hg19 BAM against hg38 sizes placed every read at its hg19 position
+	in a file of hg38 lengths, with nothing said but the few reads past the
+	shorter ends; a sizes file of other names dropped every read.
+	"""
+
+	lengths = dict(chrom_sizes)
+	for filename in filenames:
+		if not filename.endswith(('.bam', '.sam')):
+			continue
+		import pysam
+		with pysam.AlignmentFile(filename, check_sq=False) as handle:
+			header = list(zip(handle.references, handle.lengths))
+		if len(header) == 0:
+			continue
+		shared = 0
+		for name, length in header:
+			if name in lengths:
+				shared += 1
+				if lengths[name] != length:
+					raise ValueError("{} aligns to a {} of {:,} bases, but the sizes "
+						"give it {:,}: the reads and the sizes must be on one assembly."
+						.format(filename, name, length, lengths[name]))
+		if shared == 0:
+			raise ValueError("none of the chromosomes of {} is in the sizes: it "
+				"has {}{} and the sizes have {}{}; the reads and the sizes must "
+				"be on one assembly, with the same names.".format(filename,
+				", ".join(name for name, _ in header[:3]), ", ..." if len(header)
+				> 3 else "", ", ".join(list(lengths)[:3]), ", ..." if len(lengths)
+				> 3 else ""))
+
+
 def main(argv=None, prog='figwig bam2fw'):
 	from .bam2bw import _check_filenames
 	from .bam2bw import _cores
@@ -430,6 +468,7 @@ def main(argv=None, prog='figwig bam2fw'):
 			if not os.path.isfile(filename):
 				raise ValueError("{} is not a file.".format(filename))
 		chrom_sizes = read_chrom_sizes(args.sizes)
+		_check_bam_headers(args.filename, chrom_sizes)
 		cores = _cores(args.parallel)
 		if args.barcode_column is None:
 			tracks, groups = _tracks_for_files(args.filename, args.metadata,

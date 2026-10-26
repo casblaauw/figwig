@@ -230,6 +230,31 @@ def test_errors(tmp_path, bam, sizes):
 	assert bam2fw(tmp_path, [bam], sizes, "--force") == path
 
 
+def test_bam_header_is_checked_against_the_sizes(tmp_path, bam):
+	"""A chromosome the BAM's header and the sizes both name must have one
+	length, and the BAM must share a chromosome with the sizes: an hg19 BAM
+	against hg38 sizes placed every read at its hg19 position, and sizes of
+	other names dropped every read, both with exit 0."""
+
+	other = write_chrom_sizes(tmp_path / "other.sizes", [("chr1", 1001),
+		("chr2", 500)])
+	with pytest.raises(SystemExit, match="aligns to a chr1 of 1,000 bases, but "
+			"the sizes give it 1,001: the reads and the sizes must be on one "
+			"assembly"):
+		bam2fw(tmp_path, [bam], str(other))
+	renamed = write_chrom_sizes(tmp_path / "renamed.sizes", [("1", 1000),
+		("2", 500)])
+	with pytest.raises(SystemExit, match="none of the chromosomes of .* is in "
+			"the sizes: it has chr1, chr2, chr3, ... and the sizes have 1, 2"):
+		bam2fw(tmp_path, [bam], str(renamed))
+	# A sizes file that names some of the BAM's chromosomes, at their
+	# lengths, still converts; the others' reads are left out and reported.
+	subset = write_chrom_sizes(tmp_path / "subset.sizes", [("chr2", 500)])
+	path = bam2fw(tmp_path, [bam], str(subset))
+	assert list(FigWigReader(path).chrom_sizes) == ["chr2"]
+
+
+
 def test_helpers():
 	assert figwig.bam2fw._base_name("/a/b/x.tsv.gz") == "x"
 	assert figwig.bam2fw._base_name("x.bam") == "x"
