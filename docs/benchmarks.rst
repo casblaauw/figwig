@@ -38,6 +38,35 @@ On one thread figwig took 0.81 s to pybigtools' 1.25 s on the ATAC file, and
 1.85 s to 1.98 s on the denser DNase file. Its advantage is that its threads
 run in parallel.
 
+ISA-L decompression
+~~~~~~~~~~~~~~~~~~~
+
+The reader above, with ``engine='auto'`` where python-isal 1.8 is installed
+(the ``isal`` extra), against ``engine='zlib'`` on the same branch and the
+reader before the engines were added, on the same 167,750 windows from
+tmpfs. Every setting ran in its own process, five times, alternating; the
+table gives the median of the second read in each process, and the last
+column the first read, which includes loading the compiled kernels and
+ISA-L's one-block self-check. The load on the shared machine was 58 to 62
+of 256 cores throughout. Every run gave the same values.
+
+======  =======  ============  =================  ===========  =============  ===============================
+bigWig  threads  zlib, before  zlib, this branch  ISA-L        ISA-L speedup  first read, zlib before / ISA-L
+======  =======  ============  =================  ===========  =============  ===============================
+ATAC    1        1.067 s       1.053 s            **0.774 s**  1.38x          1.123 s / 0.885 s
+ATAC    2        0.562 s       0.558 s            **0.410 s**  1.37x          0.650 s / 0.541 s
+ATAC    4        0.297 s       0.301 s            **0.223 s**  1.33x          0.385 s / 0.369 s
+ATAC    8        0.176 s       0.177 s            **0.136 s**  1.29x          0.276 s / 0.285 s
+DNase   1        2.030 s       2.079 s            **1.366 s**  1.49x          2.104 s / 1.510 s
+DNase   2        1.066 s       1.075 s            **0.699 s**  1.53x          1.135 s / 0.816 s
+DNase   4        0.561 s       0.557 s            **0.401 s**  1.40x          0.636 s / 0.518 s
+DNase   8        0.311 s       0.306 s            **0.221 s**  1.41x          0.408 s / 0.379 s
+======  =======  ============  =================  ===========  =============  ===============================
+
+ISA-L inflates bigWig blocks 1.3 to 1.5 times faster than zlib, more at
+fewer threads, where decompression is a larger share of the read; the zlib
+engine itself is unchanged. On a first read the gain is 1.0 to 1.4x.
+
 Writing
 -------
 
@@ -75,6 +104,37 @@ of figwig's time. Its peak memory was above pyBigWig's without zoom levels,
 554 MB against 354 MB for the counts on one thread, of which the arrays of
 values held 318 MB, and below it with them, 739 MB on 8 threads against
 1,089 MB.
+
+The batch pipeline
+~~~~~~~~~~~~~~~~~~
+
+``compare_writers.py`` again, figwig only, before and after the writer
+started planning each batch on a thread of its own and encoding and
+compressing it on the pool, on the counts and signal tracks above and on
+the ATAC-seq and DNase-seq bigWigs of the reading benchmark (26.4 and 77.6
+million intervals). Three repeats each, the median, at a load of 57 to 63 of
+256 cores; the arrow goes from before to after. Every file written was byte
+for byte the one written before.
+
+===================  =========================  =======================  =========================  =========================
+track                libdeflate, 1 thread       libdeflate, 8 threads    zlib, 1 thread             zlib, 8 threads
+===================  =========================  =======================  =========================  =========================
+counts               1.11 s → 1.03 s (1.08x)    0.21 s → 0.14 s (1.54x)  4.35 s → 4.29 s (1.01x)    0.53 s → 0.54 s (0.99x)
+counts, zoom levels  4.90 s → 4.82 s (1.02x)    0.76 s → 0.68 s (1.12x)  12.16 s → 12.14 s (1.00x)  1.65 s → 1.64 s (1.00x)
+signal               1.79 s → 1.74 s (1.03x)    0.32 s → 0.22 s (1.47x)  6.32 s → 6.20 s (1.02x)    0.81 s → 0.78 s (1.04x)
+signal, zoom levels  3.18 s → 3.12 s (1.02x)    0.53 s → 0.45 s (1.19x)  8.20 s → 8.05 s (1.02x)    1.07 s → 1.07 s (1.00x)
+ATAC                 3.32 s → 3.19 s (1.04x)    0.64 s → 0.42 s (1.51x)  15.67 s → 15.38 s (1.02x)  1.99 s → 1.94 s (1.03x)
+ATAC, zoom levels    12.66 s → 12.70 s (1.00x)  2.08 s → 1.90 s (1.09x)  35.94 s → 36.06 s (1.00x)  4.80 s → 4.75 s (1.01x)
+DNase                9.61 s → 9.04 s (1.06x)    1.67 s → 1.19 s (1.40x)  49.14 s → 48.34 s (1.02x)  6.23 s → 6.10 s (1.02x)
+DNase, zoom levels   27.83 s → 27.86 s (1.00x)  4.37 s → 3.97 s (1.10x)  90.68 s → 89.72 s (1.01x)  11.97 s → 11.70 s (1.02x)
+===================  =========================  =======================  =========================  =========================
+
+With libdeflate and no zoom levels the calling thread, which laid out every
+block itself, was the limit on 8 threads, and the pipeline takes 1.4 to 1.5
+times less there. Elsewhere the compressor (zlib) or the zoom pass sets the
+time, and the gain is 0 to 19%. Peak memory is 3 to 12% lower without zoom
+levels, since a threaded writer takes batches of 786,432 items instead of
+1,048,576, and within 6% either way with them.
 
 figwig bam2bw
 -------------

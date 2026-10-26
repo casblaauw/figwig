@@ -862,6 +862,97 @@ def test_bad_write(tmp_path, call, error, match):
 			call(writer)
 
 
+@pytest.mark.parametrize('intervals', [False, True])
+@pytest.mark.parametrize('dtype', ['float32', 'float64', 'float16',
+	'longdouble', '>f8', 'int64', 'uint64', 'bool'])
+@pytest.mark.parametrize('layout', ['contiguous', 'strided', 'reversed',
+	'broadcast'])
+def test_fused_validation_matches_original(tmp_path, monkeypatch, intervals,
+	dtype, layout):
+	"""Validation accepts the same numeric layouts and writes the same bytes
+	as the original path, including types left to numpy."""
+
+	starts = numpy.arange(8, dtype=numpy.int64) * 4
+	values = numpy.arange(16).astype(dtype)
+	if layout == 'strided':
+		values = values[::2]
+	elif layout == 'reversed':
+		values = values[7::-1]
+	elif layout == 'broadcast':
+		values = numpy.broadcast_to(values[1], (8,))
+	else:
+		values = values[:8]
+	if not intervals:
+		values = values[:, None]
+	ends = starts + 2 if intervals else None
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+				patch.setattr(figwig.writer, '_check_sorted_intervals',
+					lambda *args: 0)
+			figwig.write_bigwig(tmp_path / (name + '.bw'), {'chr1': 100},
+				'chr1', starts, values, ends=ends, engine='zlib', n_jobs=1)
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
+@pytest.mark.parametrize('dtype', [numpy.float32, numpy.float64])
+@pytest.mark.parametrize('width', [64, 1024, 65537])
+def test_dense_validation_matches_original(tmp_path, monkeypatch, dtype, width):
+	"""Dense windows and their partial last row keep the same bytes through
+	compiled float64 checks and vectorized float32 checks."""
+
+	starts = numpy.arange(4, dtype=numpy.int64) * width
+	values = numpy.random.default_rng(9).normal(size=(4, width)).astype(dtype)
+	values[-1, width // 2:] = numpy.nan
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+			figwig.write_bigwig(tmp_path / (name + '.bw'),
+				{'chr1': 3 * width + width // 2}, 'chr1', starts, values,
+				engine='zlib', n_jobs=1)
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
+@pytest.mark.parametrize('starts, values, ends', [
+	([-1, 2], [[numpy.inf], [1]], None),
+	([0, 2], [[1e39], [numpy.inf]], None),
+	([0, 0], [[1], [numpy.inf]], None),
+	([0, 2], [numpy.inf, 1], [1, 2]),
+	([0, 2], [numpy.inf, 1], [1, 101]),
+	([2, 0], [1, 1], [4, 3]),
+	([0, 2, 4], [[1e39], [1], [numpy.inf]], None),
+])
+def test_fused_validation_preserves_errors_and_state(tmp_path, monkeypatch,
+	starts, values, ends):
+	"""Competing errors retain the original message and precedence, and a
+	rejected call changes neither the file nor the next accepted position."""
+
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 2)
+	messages = []
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+				patch.setattr(figwig.writer, '_check_sorted_intervals',
+					lambda *args: 0)
+			with figwig.BigWigWriter(tmp_path / (name + '.bw'),
+					{'chr1': 100}, engine='zlib', n_jobs=1) as writer:
+				with pytest.raises(ValueError) as error:
+					writer.write('chr1', starts, values, ends=ends)
+				messages.append(str(error.value))
+				writer.write('chr1', [0], [[2]])
+	assert messages[0] == messages[1]
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
 def test_one_numpy_name_is_quoted_as_a_name(tmp_path):
 	"""A single chromosome given as a numpy string, such as one element of an
 	array of names, showed as np.str_('chr1') in error messages."""
@@ -1215,28 +1306,37 @@ def test_zoom_records_full_block():
 	assert open_ints.tolist() == [1, 1, 0, 102_205, 102_206, 1]
 
 
+def summarize(kinds, n_items, starts, ends, values):
+	"""The counts and stats `_update_summary_blocks` adds up for blocks of
+	the given section types and numbers of items."""
+
+	counts = numpy.zeros(2, dtype=numpy.uint64)
+	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
+	n_items = numpy.array(n_items, dtype=numpy.int64)
+	figwig._kernels._update_summary_blocks(numpy.array(kinds, dtype=numpy.int64),
+		numpy.cumsum(n_items) - n_items, n_items, numpy.array(starts,
+		dtype=numpy.int64), numpy.array(ends, dtype=numpy.int64), numpy.array(
+		values, dtype=numpy.float32), counts, stats)
+	return counts, stats
+
+
 def test_update_summary_by_hand():
 	"""The minimum and maximum are those of the values, the first value
 	included. The sum adds each span times value as float32, so 3 * 0.1
-	rounds to float32 before it is added, as in libBigWig."""
+	rounds to float32 before it is added, as in libBigWig. A bedGraph item
+	spans from its start to its end, and an item of another section type one
+	base, whatever its end."""
 
-	counts = numpy.zeros(2, dtype=numpy.uint64)
-	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
-	figwig._kernels._update_summary(numpy.array([3, 1], dtype=numpy.uint32),
-		numpy.array([0.1, 0.5], dtype=numpy.float32), counts, stats)
-	assert stats[1] == 0.5
-
-	counts = numpy.zeros(2, dtype=numpy.uint64)
-	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
-	figwig._kernels._update_summary(numpy.array([3, 1], dtype=numpy.uint32),
-		numpy.array([0.5, 0.1], dtype=numpy.float32)[::-1].copy(), counts, stats)
-
+	counts, stats = summarize([1], [2], [0, 3], [3, 4], [0.1, 0.5])
 	assert counts.tolist() == [4, 2]
 	assert stats[0] == float(numpy.float32(0.1))
 	assert stats[1] == 0.5
 	assert stats[2] == float(numpy.float32(numpy.float32(3) * numpy.float32(
 		0.1))) + 0.5
 	assert stats[3] == 3 * float(numpy.float32(0.1)) ** 2 + 0.25
+
+	counts, _ = summarize([2, 3], [2, 1], [0, 5, 9], [100, 100, 100], [1, 1, 1])
+	assert counts.tolist() == [3, 3]
 
 
 def test_zoom_reductions():
@@ -1436,3 +1536,15 @@ def test_close(tmp_path):
 	assert writer.chrom_sizes == CHROMS
 	assert figwig.BigWigReader(str(tmp_path / 'a.bw')).read('chr1', [5],
 		2).tolist() == [[2.0, 0.0]]
+
+
+def test_zoom_pending_records_own_their_memory():
+	zoom = figwig.writer._ZoomLevel(16)
+	ints = numpy.zeros((5000, 4), dtype=numpy.uint32)
+	floats = numpy.zeros((5000, 4), dtype=numpy.float32)
+	zoom._take([(ints, floats)], False)
+	assert zoom.pending_ints.base is None
+	assert zoom.pending_floats.base is None
+	assert len(zoom.pending_ints) < figwig.writer._ZOOM_BLOCK_RECORDS
+
+

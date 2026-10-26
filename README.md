@@ -164,6 +164,8 @@ Optional extras:
 
 - `figwig[fast]` adds the `deflate` package, which writes bigWigs several
   times faster and reads figwig files about twice as fast.
+- `figwig[isal]` adds the `isal` package, whose ISA-L reads bigWigs 1.3 to 1.5
+  times faster, with the same values.
 - `figwig[bam2bw]` adds pysam, pyfaidx, biopython, tqdm, isal and deflate,
   which `figwig bam2bw` needs. `figwig bam2bw` runs on Linux and macOS, since
   pysam does not support Windows.
@@ -174,6 +176,7 @@ Optional extras:
 
 ```bash
 pip install "figwig[fast]"
+pip install "figwig[isal]"
 pip install "figwig[bam2bw]"
 pip install "figwig[cuda]"
 ```

@@ -41,6 +41,9 @@ dependencies = [
 fast = [
     "deflate>=0.9",
 ]
+isal = [
+    "isal>=1.8",
+]
 cuda = [
     "cupy-cuda12x>=13",
 ]

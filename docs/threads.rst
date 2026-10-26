@@ -62,13 +62,15 @@ on its pool and partial tiles on the calling thread, compresses on the
 pool, and holds about 0.5 GB plus two to three times the call's values, so
 a call of a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
 each piece of a chromosome on one thread while the writer takes the last,
-and ``-p 8`` is where it stops gaining. A bigWig writer lays out values on
-the calling thread in batches of about a million
-items, and compresses each batch's data blocks on up to ``n_jobs`` other
-threads while it lays out the next one. With libdeflate, the calling thread
-becomes the limit: writing 15.9 million per-base counts took 1.07 s on one
-thread and 0.18 s on 8, and no less on 16 or 32. zlib compresses about four
-times slower, so it keeps gaining up to 32 threads, where it took 0.20 s.
+and ``-p 8`` is where it stops gaining. A bigWig writer takes values in
+batches of about a million items on one thread, or 786,432 with threads,
+where a planning thread lays each batch out as data blocks, up to ``n_jobs``
+pool threads encode and compress them, and a summary thread folds the batch
+into the file's totals in file order, so the calling thread only takes the
+next batch, with at most two batches in flight. With libdeflate the encoding
+is the limit: writing 15.9 million per-base counts took 1.03 s on one thread and 0.14 s on 8, against 1.11 and 0.21 s when the calling thread laid out the blocks (:doc:`benchmarks`). zlib
+compresses about four times slower, so it keeps gaining up to 32 threads,
+where it took 0.20 s.
 Zoom levels are built when the writer is closed, with the same threads, and
 add a pass over the data.
 

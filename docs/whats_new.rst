@@ -40,10 +40,14 @@ Reading
 
 	- The bigWig reader takes a file whose index leaves lie in natural chromosome order, chr1, chr2, ..., chr10, where the ids run chr1, chr10, chr2, by sorting the leaves; two bigWigs of the test collection were refused as unsorted where pyBigWig read them. ``BigWigReader.read`` and ``read_bigwig`` take ``keep_nan=``, with which an interval whose value is NaN reads as NaN rather than ``missing``.
 
+	- ``read`` and ``read_bigwig`` take ``engine``: ``'auto'``, the default, ``'zlib'`` or ``'isal'``. ``'auto'`` inflates data blocks with ISA-L where python-isal 1.8 or later is installed (the new ``isal`` extra; the ``bam2bw`` extra installs it too) and with zlib otherwise. ISA-L is called through two functions python-isal's extension exports, from the numba kernel without the GIL, as zlib's ``uncompress()`` is, so no compiler is needed; the kernel writes ISA-L's inflate state at the offsets of ISA-L 2.31.1, so it is used only with that version, on 64-bit platforms, and only once one known block inflated through it has given zlib's bytes. Every engine gives the same values, and the reading tests run under both. Reading the benchmarks' ATAC-seq and DNase-seq bigWigs takes 1.3 to 1.5 times less on 1 to 8 threads (1.0 to 1.4 on a first read in a fresh process). Thanks @YaoxiangLi!
+
 Writing
 -------
 
 	- ``_zoom_records``, the kernel that summarizes items into one zoom level's records, holds the open record in locals and stores it back when it returns, instead of writing it to the level's state arrays for every item. Zoom levels are summarized on different threads at once, and their small state arrays can share a cache line, which makes the kernel many times slower in the processes where the arrays happen to be allocated next to each other. The files written are unchanged. Thanks @YaoxiangLi!
+
+	- With threads, ``BigWigWriter`` plans each batch of items as data blocks on a thread of its own, encodes and compresses the blocks on the pool, and folds the batch into the file's summary in file order on another thread, so the calling thread only takes the next call's values; before, it laid every batch out itself, which was the limit with libdeflate from 8 threads on. Sorted input with valid values, the common case, is confirmed in one compiled pass instead of the masks and differences of the general checks, which now run only when that pass finds something and raise the same errors in the same order. Threaded writers take batches of 786,432 items instead of 1,048,576, so they hold less input at once. The files written are unchanged, byte for byte. Writing the benchmarks' tracks with libdeflate and no zoom levels on 8 threads takes 1.4 to 1.5 times less, other settings up to 1.2 times less, and peak memory without zoom levels falls by 3 to 12%. Thanks @YaoxiangLi!
 
 Claude Code skill
 -----------------

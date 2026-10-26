@@ -33,6 +33,8 @@ writes nothing; writers stay usable.
 | `values must hold one value per interval, of shape (n,), not …` | 2-D values with `ends` |
 | `engine='libdeflate' needs the deflate package: pip install deflate.`, `engine='libdeflate' needs libdeflate's functions, which could not be loaded…` (Windows) | → the `fast` extra, or `engine='zlib'` |
 | `level must be from 0 to 9 with engine 'zlib', not 12.` | zlib 0-9, libdeflate 0-12, isal 0-3 |
+| `engine='isal' requires figwig[isal].` (reading) | → the `isal` extra, or `engine='auto'`, which reads with zlib without it |
+| `engine must be 'auto', 'zlib' or 'isal', not 'libdeflate'.` (reading) | the reader's engines are the inflaters; libdeflate is a writer engine |
 | `this BigWigWriter has been closed.` | `write` after `close` |
 
 ## figwig bam2bw and bam2fw
