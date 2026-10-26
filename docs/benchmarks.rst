@@ -716,35 +716,82 @@ Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The defaults, a tile of 16,384 and groups of 8, suit count tracks, whose
-chunks are mostly zero. Nine chr22 annotation tracks (phyloP, phastCons,
-GC content and mappability, 742 MB as bigWigs) were converted at the
-defaults and at ``-t 1024 --groups 1 -l 1``, and read as 10,000 random 1
-kb windows over every track on one thread, at load about 53:
+chunks are mostly zero. Dense float tracks are the other case: three
+conservation tracks over chr22, phyloP100way, Zoonomia phyloP and
+phastCons100way (609 MB as bigWigs; 71%, 71% and 45% of bases nonzero),
+were written from float32 arrays in calls of 4 Mb and read as 8,192 random
+windows of 2,048 bp over every track, and whole, at the defaults and at
+``-t 1024 --groups 1``, against their bigWigs through ``read_bigwig``, on
+1, 8 and 32 threads at a load of 26 of 256 cores; the median of 3 after a
+warm-up. "Before" is the reader and writer before the runs decoder filled
+a window's row in place and batches were sized per thread.
 
-==================================  ========  ========  =========
-layout                              file      1 thread  8 threads
-==================================  ========  ========  =========
-tile 16,384, groups of 8, level 6   190 MB    9.6 s     2.3 s
-tile 1,024, groups of 1, level 1    290 MB    1.33 s    0.39 s
-nine bigWigs, ``read_bigwig``       742 MB    1.5 s     0.5 s
-==================================  ========  ========  =========
+.. list-table::
+   :header-rows: 1
+   :widths: 40 12 12 12 12 12
 
-A second run of six chr22 tracks at 500 bp and 1 kb windows gave the
-same picture (9.7 s at the defaults against 0.81 s at ``-t 1024 --groups
-1`` for 10,000 500 bp windows, and 1.17 s for the bigWigs), and found
-``-l 1`` no faster than level 6 for a file 8% larger, so the tile and
-groups are the advice. Count tracks go the other way: 8 of 48 count
-tracks read in short windows from one group of 48 in a quarter to a half
-of the time from 48 groups of one, since a sparse chunk's other tracks are
-stepped over by their byte counts.
+   * - 8,192 windows of 2,048 bp
+     - file
+     - 1 thread
+     - 8 threads
+     - 32 threads
+     - vs bigWigs
+   * - three bigWigs, ``read_bigwig``
+     - 609 MB
+     - 0.80 s
+     - 0.12 s
+     - 0.11 s
+     - 1.0x
+   * - tile 16,384, groups of 8, before
+     - 181 MB
+     - 1.95 s
+     - 0.42 s
+     - 0.21 s
+     - 0.4-0.5x
+   * - tile 16,384, groups of 8
+     - 181 MB
+     - **0.51 s**
+     - **0.070 s**
+     - **0.034 s**
+     - 1.6-3.2x
+   * - tile 1,024, groups of 1, before
+     - 233 MB
+     - 0.78 s
+     - 0.13 s
+     - 0.056 s
+     - 1.0-2.0x
+   * - tile 1,024, groups of 1
+     - 233 MB
+     - 0.37 s
+     - 0.070 s
+     - 0.047 s
+     - 1.7-2.3x
 
-A 1 kb window from a 16,384-base tile decodes 16 kb of float32 per
-track, and every track of its group with it; a dense GC track grouped
-with two phyloP tracks made a read of one of those 12 times slower (0.69
-s against 0.057 s for 20,000 windows) than with ``--groups 1``, for a
-file 3% smaller. The same tracks read in 100 bp bins over the whole of
-chr22 took 0.09 s from the small-tile file against 9.8 s for pyBigWig's
-``stats``.
+The whole chromosome, 152 million values into float32, read in 0.58, 0.089
+and 0.040 s at the defaults (1.78, 0.38 and 0.18 s before), and 0.94,
+0.17 and 0.098 s at the small tile. The three tracks were written in 4.1,
+0.55 and 0.19 s on 1, 8 and 32 threads at the defaults (4.1, 0.67 and 0.39
+s before) and 3.7, 0.54 and 0.24 s at the small tile; on one thread
+libdeflate's level 6 is 85% of the write, and a dense float chunk
+compresses by 2.4.
+
+Two things made the difference. The writer stores a tile whose values
+hold for a base or two, as conservation scores do, as a runs chunk, a
+change at every base or two; its decoder took the window's row and called
+the per-run kernel at each change, 70 ns a change, where it now fills the
+row in place at 3 ns. And a chromosome of 196 KB chunks was one batch of
+32 MB after another, 13 for chr22, so 32 threads split each batch's
+windows and inflated its chunks again; batches now hold at least two per
+thread, and a write call's dense tiles are cut into up to one task per
+thread of at least 4 MB where they were two tasks whatever the pool's
+size. A 2 kb window from a 16,384-base tile still decodes 16 kb of float32
+per track, and every track of its group with it, which is what the small
+tile and single groups save on one thread; count tracks go the other way,
+since a sparse chunk's other tracks are stepped over by their byte counts,
+and 8 of 48 count tracks read in short windows from one group of 48 in a
+quarter to a half of the time from 48 groups of one. The same tracks read
+in 100 bp bins over the whole of chr22 took 0.09 s from the small-tile
+file against 9.8 s for pyBigWig's ``stats``.
 
 Single cells
 ~~~~~~~~~~~~

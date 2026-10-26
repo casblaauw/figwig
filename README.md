@@ -128,13 +128,12 @@ reference reader, on [the format page](https://figwig.readthedocs.io/en/latest/f
 
 The format is built for count, pileup, single-cell and other sparse or
 integer tracks read many at a time, where it is a fifth of the bigWigs'
-size and reads faster. A dense float track read in short windows, such
-as conservation or fold change, is not: at the default tile of 16,384
-bases every 2 kb window decodes a whole tile of every track in its group,
-and such a file reads slower than the bigWigs. Convert those with
-`figwig bw2fw -t 1024 --groups 1`, which the
-[converters page](https://figwig.readthedocs.io/en/latest/converters.html)
-explains, or keep them as bigWigs.
+size and reads faster. Dense float tracks, such as conservation or fold
+change, gain less in size, and a 2 kb window of them decodes a whole tile
+of every track in its group; three phyloP and phastCons tracks over chr22
+still read 1.6 to 3.8 times faster than their bigWigs on 1 to 32 threads,
+and the [converters page](https://figwig.readthedocs.io/en/latest/converters.html)
+says when a smaller tile pays.
 
 
 | format | 6 tracks | 48 tracks | 512 tracks |

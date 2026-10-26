@@ -52,8 +52,9 @@ groups after its tracks; its chromosomes, tile and level are kept, and
 that the file does not have is left out with a warning. The defaults
 suit count tracks, which read fastest in one group of many; for dense
 float tracks read in short windows, such as conservation or fold-change
-signal, the default file reads slower than the bigWigs did, and
-``-t 1024 --groups 1`` reads seven times faster for a file half
+signal, ``-t 1024 --groups 1`` reads a third faster on one thread for a
+file a quarter larger (:doc:`benchmarks`), and the default is faster from
+8 threads on; before the runs decoder was rewritten it was seven times faster for a file half
 again as large (:doc:`benchmarks`).
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a

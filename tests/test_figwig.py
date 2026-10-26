@@ -2736,3 +2736,99 @@ def test_chunk_crcs_are_zlibs():
 	for n in range(0, 40):
 		piece = data[:n]
 		assert _crcs(piece, numpy.array([0, n])).tolist() == [zlib.crc32(piece)]
+
+
+# Dense tracks: short runs decode in place, and a chromosome of dense chunks
+# is planned as enough batches for every thread without a chunk being
+# inflated twice.
+
+
+@pytest.fixture(scope='module')
+def runs_fw(tmp_path_factory):
+	"""A float32 track whose values hold for one to three bases, as
+	conservation scores do, stored as runs chunks, beside a dense random
+	track, at the default tile."""
+
+	rng = numpy.random.default_rng(5)
+	length = 4 * 16384 + 1000
+	lengths = rng.integers(1, 4, length)
+	values = numpy.repeat(rng.choice([-1.5, 0.0, 0.25, 2.0], length), lengths)[
+		:length].astype(numpy.float32)
+	dense = rng.normal(size=length).astype(numpy.float32)
+	path = str(tmp_path_factory.mktemp('runs') / 'runs.fw')
+	with FigWigWriter(path, {'chr1': length}, [{'name': 'cons', 'dtype':
+			'float32'}, {'name': 'noise', 'dtype': 'float32'}], groups=[['cons'],
+			['noise']], n_jobs=2) as writer:
+		writer.write('chr1', [0], numpy.stack([values, dense])[None])
+	return path, values, dense
+
+
+def test_short_runs_read_as_written(runs_fw, read_batching):
+	"""Windows, labels, bins, sums and entries of a track of runs a few
+	bases long give what the values were, with the chunk kinds the writer
+	chose: runs for the scores, dense for the noise."""
+
+	path, values, dense = runs_fw
+	reader = FigWigReader(path)
+	kinds = reader._group_index(0)[0]
+	assert set(((kinds[kinds > 0] & 7)).tolist()) == {4}
+	noise = reader._group_index(1)[0]
+	assert (noise[:4] & 7).tolist() == [1, 1, 1, 1]    # the last tile is partial
+	length = len(values)
+	rng = numpy.random.default_rng(6)
+	starts = numpy.sort(rng.integers(0, length - 100, 300))
+	starts = numpy.append(starts, [16384 - 50, 2 * 16384 - 1, length - 60])
+	n = len(starts)
+	expected = numpy.stack([numpy.stack([v[s:s + 100] if s + 100 <= length else
+		numpy.append(v[s:], numpy.full(s + 100 - length, numpy.nan, numpy.float32))
+		for s in starts]) for v in (values, dense)], axis=1)
+
+	for n_jobs in (1, 3):
+		got = reader.read('chr1', starts, 100, n_jobs=n_jobs)
+		assert_identical(got, expected)
+		# Accumulating paths: a label summing both tracks, and bins.
+		both = reader.read('chr1', starts, 100, labels=[0, 0], n_jobs=n_jobs)
+		assert numpy.allclose(both[:, 0], numpy.nansum(expected, axis=1).astype(
+			numpy.float32) + 0 * numpy.where(numpy.isnan(expected).all(axis=1),
+			numpy.nan, 0), equal_nan=True, atol=1e-5)
+		binned = reader.read('chr1', starts, 100, bins=10, n_jobs=n_jobs)
+		assert numpy.allclose(numpy.nan_to_num(binned), numpy.nansum(
+			expected.reshape(n, 2, 10, 10), axis=3), atol=1e-5)
+		sums = reader.sums('chr1', starts, numpy.minimum(starts + 100, length),
+			n_jobs=n_jobs)
+		assert numpy.allclose(sums, numpy.nansum(expected, axis=2), atol=1e-5)
+	entries = reader.read('chr1', starts[:5], 100, sparse=True)
+	rebuilt = numpy.zeros((5, 2, 100), dtype=numpy.float32)
+	rebuilt[entries.rows, entries.channels, entries.offsets] = entries.values
+	assert_identical(rebuilt, numpy.nan_to_num(expected[:5]))
+
+
+def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
+	"""A read of a chromosome of dense chunks plans at least as many
+	batches as threads, each chunk in one batch, where one batch of
+	_BATCH_BYTES held them all and the threads split its windows."""
+
+	length = 600 * TILE
+	rng = numpy.random.default_rng(7)
+	values = rng.integers(1, 200, (2, length)).astype(numpy.float32)
+	path = str(tmp_path / 'dense.fw')
+	with FigWigWriter(path, {'chr1': length}, ['a', 'b'], tile=TILE,
+			n_jobs=1) as writer:
+		writer.write('chr1', [0], values[None])
+	reader = FigWigReader(path)
+	seen = []
+	run = figwig.figwig.FigWigReader._run
+
+	def recorded(self, tasks, n_threads, summed=None, copies=False):
+		seen.append((tasks, n_threads))
+		return run(self, tasks, n_threads, summed, copies)
+
+	monkeypatch.setattr(figwig.figwig.FigWigReader, '_run', recorded)
+	starts = numpy.arange(0, length - 200, 37)
+	got = reader.read('chr1', starts, 200, n_jobs=8)
+	numpy.testing.assert_array_equal(got, numpy.stack([values[:, s:s + 200] for
+		s in starts]))
+	tasks, n_threads = seen[-1]
+	assert n_threads == 8 and len(tasks) >= 8
+	tiles = numpy.concatenate([task.gtiles for task in tasks])
+	assert len(tiles) == len(numpy.unique(tiles)) == 600

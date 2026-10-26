@@ -1773,7 +1773,44 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 				channels[slot, a - start:b - start] = 0
 
 			p = 0
-			if kind == _RUNS:
+			if kind == _RUNS and not listing and bins == 1 and nan_mode == 0:
+				# The common case, a window set or added into its row: the
+				# row is taken once and each run filled in place. Taking the
+				# row and calling `_put_run` per change cost 70 ns a change
+				# where runs are a base or two long, as conservation scores'
+				# are, against a few ns here.
+				dst = channels[slot]
+				current = 0.0
+				since = base
+				while at < end:
+					delta, at = _get_varint(data, at)
+					p += delta
+					here = base + p
+					if here >= b:
+						d += 1
+						break
+					if here > since:
+						lo = max(since, a) - start
+						hi = here - start
+						if accumulate:
+							for q in range(lo, hi):
+								dst[q] += current
+						else:
+							for q in range(lo, hi):
+								dst[q] = current
+					current = values[d]
+					since = here
+					d += 1
+				if since < b:
+					lo = max(since, a) - start
+					hi = b - start
+					if accumulate:
+						for q in range(lo, hi):
+							dst[q] += current
+					else:
+						for q in range(lo, hi):
+							dst[q] = current
+			elif kind == _RUNS:
 				# The value from each change up to the next, clipped to the
 				# window; 0 before the first change.
 				current = 0.0
