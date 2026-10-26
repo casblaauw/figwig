@@ -123,6 +123,10 @@ them rolled by a seeded offset. Every reader returned the same bytes. The
 has writes, sizes, real ENCODE signal tracks, single cells, reads as
 tracks and the time to a CUDA tensor.
 
+The format is specified byte by byte, with a Kaitai Struct definition and a
+reference reader, on [the format page](https://figwig.readthedocs.io/en/latest/format.html).
+
+
 | format | 6 tracks | 48 tracks | 512 tracks |
 |---|---|---|---|
 | figwig file, position order | **0.065 / 0.017 / 0.021 s** | **0.43 / 0.085 / 0.044 s** | **1.16 / 0.22 / 0.11 s** |

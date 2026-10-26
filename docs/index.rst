@@ -140,6 +140,7 @@ uninstalled.
    reading
    writing
    figwig
+   format
    threads
    benchmarks
 

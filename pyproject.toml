@@ -68,6 +68,7 @@ dev = [
     "ruff>=0.4",
     "build>=1.0",
     "twine>=4.0",
+    "kaitaistruct>=0.10",
 ]
 docs = [
     "sphinx>=7.0",
