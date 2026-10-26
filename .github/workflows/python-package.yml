@@ -4,10 +4,13 @@
 #
 # The tests compile a few hundred numba kernel specializations, which from
 # scratch is most of a job's time, so each job keeps numba's cache between
-# runs: the cache key names the kernel sources, and numba checks a source
-# file's hash (0.61 and later) or its mtime and size (earlier), which the
-# checkout sets to each file's last commit time. The tests run on every
-# core of the runner (pytest-xdist).
+# runs. numba invalidates a cached kernel when its own source file changes
+# (by hash from 0.61, by mtime and size before, which the checkout sets to
+# each file's last commit time) and not when a kernel or constant it uses
+# from another file changes, so the key is the hash of every file that
+# holds a kernel, with no fallback: a commit that touches one of them
+# compiles everything from scratch, as before this cache. The tests run on
+# every core of the runner (pytest-xdist).
 
 name: Python package
 
@@ -55,10 +58,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .numba_cache
-          key: numba-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('figwig/*.py') }}
-          restore-keys: |
-            numba-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-
-            numba-${{ matrix.os }}-${{ matrix.python-version }}-
+          key: numba-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
 
       - name: Install dependencies
         run: uv sync --extra dev
@@ -87,10 +87,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .numba_cache
-          key: numba-lowest-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('figwig/*.py') }}
-          restore-keys: |
-            numba-lowest-${{ hashFiles('pyproject.toml') }}-
-            numba-lowest-
+          key: numba-lowest-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('figwig/_kernels.py', 'figwig/_figwig_kernels.py', 'figwig/bam2bw.py', 'figwig/_cells.py') }}
 
       - name: Test with the lowest direct dependencies
         run: uv run --isolated --resolution lowest-direct --extra dev pytest -n auto
