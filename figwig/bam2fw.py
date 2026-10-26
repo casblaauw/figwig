@@ -407,11 +407,14 @@ def _cells_main(args, prog, cores, chrom_sizes):
 
 
 def _check_bam_headers(filenames, chrom_sizes):
-	"""Compare each BAM or SAM file's header with the sizes: a chromosome
-	they share must have one length, and a file must share at least one,
-	since the sizes name the assembly the counts are placed on and the file
-	the one its reads were aligned to. A file whose header names no
-	chromosome, as one of unmapped reads may, is left to the reader.
+	"""Compare each BAM or SAM file's header with the sizes and return a
+	message for each file that disagrees: a chromosome they share must have
+	one length, and a file must share at least one, since the sizes name the
+	assembly the counts are placed on and the file the one its reads were
+	aligned to. A file whose header names no chromosome, as one of unmapped
+	reads may, is left to the reader. `bam2fw` refuses the first; `figwig
+	bam2bw` prints them and goes on, as bam2bw 0.5.1 takes a sizes file of
+	other chromosomes or shorter lengths and reports the reads it leaves out.
 
 	An hg19 BAM against hg38 sizes placed every read at its hg19 position
 	in a file of hg38 lengths, with nothing said but the few reads past the
@@ -419,6 +422,7 @@ def _check_bam_headers(filenames, chrom_sizes):
 	"""
 
 	lengths = dict(chrom_sizes)
+	problems = []
 	for filename in filenames:
 		if not filename.endswith(('.bam', '.sam')):
 			continue
@@ -432,16 +436,19 @@ def _check_bam_headers(filenames, chrom_sizes):
 			if name in lengths:
 				shared += 1
 				if lengths[name] != length:
-					raise ValueError("{} aligns to a {} of {:,} bases, but the sizes "
+					problems.append("{} aligns to a {} of {:,} bases, but the sizes "
 						"give it {:,}: the reads and the sizes must be on one assembly."
 						.format(filename, name, length, lengths[name]))
-		if shared == 0:
-			raise ValueError("none of the chromosomes of {} is in the sizes: it "
-				"has {}{} and the sizes have {}{}; the reads and the sizes must "
-				"be on one assembly, with the same names.".format(filename,
-				", ".join(name for name, _ in header[:3]), ", ..." if len(header)
-				> 3 else "", ", ".join(list(lengths)[:3]), ", ..." if len(lengths)
-				> 3 else ""))
+					break
+		else:
+			if shared == 0:
+				problems.append("none of the chromosomes of {} is in the sizes: "
+					"it has {}{} and the sizes have {}{}; the reads and the sizes "
+					"must be on one assembly, with the same names.".format(filename,
+					", ".join(name for name, _ in header[:3]), ", ..." if
+					len(header) > 3 else "", ", ".join(list(lengths)[:3]), ", ..."
+					if len(lengths) > 3 else ""))
+	return problems
 
 
 def main(argv=None, prog='figwig bam2fw'):
@@ -468,7 +475,8 @@ def main(argv=None, prog='figwig bam2fw'):
 			if not os.path.isfile(filename):
 				raise ValueError("{} is not a file.".format(filename))
 		chrom_sizes = read_chrom_sizes(args.sizes)
-		_check_bam_headers(args.filename, chrom_sizes)
+		for problem in _check_bam_headers(args.filename, chrom_sizes):
+			raise ValueError(problem)
 		cores = _cores(args.parallel)
 		if args.barcode_column is None:
 			tracks, groups = _tracks_for_files(args.filename, args.metadata,

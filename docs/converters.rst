@@ -132,7 +132,10 @@ figwig bam2fw
 
 ``figwig bam2fw`` takes what :doc:`figwig bam2bw <bam2bw>` takes, SAM/BAM
 files of reads or BED/tsv files of fragments and the same options for what
-to count, and reads them the same way, on ``-p`` cores. Each BAM's header is checked against ``-s`` first, as ``bam2bw`` checks it: a chromosome both name must have one length, and the BAM must share a chromosome with the sizes. Where ``figwig
+to count, and reads them the same way, on ``-p`` cores. Each BAM's header is checked against ``-s`` first: a chromosome both
+name must have one length, and the BAM must share a chromosome with the
+sizes, or the file is refused as another assembly's or another naming's
+(``figwig bam2bw`` warns and goes on, as bam2bw does). Where ``figwig
 bam2bw`` pools every file into one pair of bigWigs, ``figwig bam2fw``
 writes each file as its own pair of tracks, ``<name>.+`` and ``<name>.-``,
 in one group, or one track with ``-u``, into ``<-n>.fw``. ``<name>`` is the

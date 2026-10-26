@@ -21,12 +21,13 @@ By default it counts the 5' end of every mapped read at each base, and writes
 the counts of the two strands to two bigWigs, ``<name>.+.bw`` and
 ``<name>.-.bw``. A BED/tsv file is read as a chromosome, a start and an end,
 with no strand, so its counts all go to ``<name>.+.bw`` unless ``-u`` is
-given. Several input files are pooled. A BAM's header is checked against
-the sizes first: a chromosome both name must have one length, and the BAM
-must share a chromosome with the sizes, or the command refuses it as
-another assembly's or another naming's. Reads on chromosomes that the
+given. Several input files are pooled. Reads on chromosomes that the
 sizes file does not list are left out, and counts that fall outside a
-chromosome, after a shift, are left out and reported. Every mapped record
+chromosome, after a shift, are left out and reported, as bam2bw does; a
+BAM whose header gives a chromosome another length than the sizes, or
+shares no chromosome with them, is reported on stderr first, since that
+is what another assembly's or another naming's sizes look like
+(``figwig bam2fw`` refuses it instead). Every mapped record
 counts, including duplicates, secondary and supplementary alignments and QC
 failures, at any mapping quality, so a BAM should be filtered first if they
 should not (``samtools view -b -F 0xF04 -q 30``, say). ``-ps`` is added to

@@ -234,7 +234,8 @@ def test_bam_header_is_checked_against_the_sizes(tmp_path, bam):
 	"""A chromosome the BAM's header and the sizes both name must have one
 	length, and the BAM must share a chromosome with the sizes: an hg19 BAM
 	against hg38 sizes placed every read at its hg19 position, and sizes of
-	other names dropped every read, both with exit 0."""
+	other names dropped every read, both with exit 0. ``figwig bam2bw``
+	warns instead, keeping bam2bw 0.5.1's behaviour."""
 
 	other = write_chrom_sizes(tmp_path / "other.sizes", [("chr1", 1001),
 		("chr2", 500)])

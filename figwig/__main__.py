@@ -87,8 +87,13 @@ def _main(argv=None):
 			if importlib.util.find_spec('pysam') is not None and os.path.isfile(
 					args.sizes):
 				from .bam2fw import _check_bam_headers
-				_check_bam_headers([f for f in args.filename if os.path.isfile(f)],
-					bam2bw.read_chrom_sizes(args.sizes))
+				# bam2bw 0.5.1 takes a sizes file of other chromosomes or
+				# shorter lengths and reports the reads it leaves out, so a
+				# header that disagrees is said, not refused, here.
+				for problem in _check_bam_headers([f for f in args.filename if
+						os.path.isfile(f)], bam2bw.read_chrom_sizes(args.sizes)):
+					print("figwig bam2bw: warning: {}".format(problem),
+						file=sys.stderr)
 			bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=True)
 		except (ValueError, TypeError, OSError) as e:
 			raise SystemExit("figwig bam2bw: {}".format(e))
