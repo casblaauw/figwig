@@ -69,7 +69,7 @@ writes nothing; writers stay usable.
 | `is being appended to by another writer` | two `append=True` writers → wait for the first to close |
 | `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
 | `none of the chromosomes of x.bw is in the sizes file: it has chr1, chr2, ... and the sizes have 1, 2, ...` | `bw2fw -s` with another assembly's sizes, or names without `chr` → a sizes file naming the bigWig's chromosomes |
-| `figwig bam2fw: file does not contain alignment data`, `no BGZF EOF marker; file may be truncated`, `x.bam is not a file.` | the input is not a BAM, is cut short, or the path is wrong |
+| `figwig bam2fw: file does not contain alignment data`, `no BGZF EOF marker; file may be truncated` (pysam's words, passed on), `x.bam is not a file.` | the input is not a BAM, is cut short, or the path is wrong |
 | `x.bam aligns to a chr1 of 249,250,621 bases, but the sizes give it 248,956,422: the reads and the sizes must be on one assembly`, `none of the chromosomes of x.bam is in the sizes` (`bam2fw` refuses; `figwig bam2bw: warning: ...` goes on, leaving the reads outside the sizes out) | `-s` is another assembly's sizes (hg19 reads, hg38 sizes) or another naming's → the assembly the BAM was aligned to |
 | `the dense output would take ... GiB` | → `sparse=True`, `labels=`, fewer windows or `out=` |
 | `a sum lies outside what ... holds`, `has values from ... to ..., which uint8 does not hold`, `pass dtype= to read as another type` | `dtype=` or `out=` too narrow or of another type |
@@ -83,4 +83,4 @@ writes nothing; writers stay usable.
 | `it is version ... of the format, and this figwig reads version 1`, `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it → upgrade |
 | `... does not match its checksum` (tables, index, header, or a chunk with `verify=True`), `cannot be read as a figwig file`, `a chunk of ... cannot be read`, `is not a regular file` | damaged, truncated, crafted, or not a file; always `ValueError` |
 | `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it`, `exists; --force writes over it` | a command onto an existing output |
-| `the table has one column; a table is tab-separated` | a space-separated metadata table |
+| `... has no row for ... in its first column ... The table has one column; a table is tab-separated, or comma-separated with a .csv extension.` | a space-separated metadata table |

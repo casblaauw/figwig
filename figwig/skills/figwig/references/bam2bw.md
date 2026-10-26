@@ -46,6 +46,9 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n sample -p 8 -f -u   # samp
 - Names must end in `.bam`, `.sam`, `.tsv`, `.tsv.gz`, `.bed` or `.bed.gz`
   (rename `.txt.gz` to `.tsv.gz`). Several inputs are pooled into one track.
 - Reads on chromosomes missing from `-s` are dropped silently unless `-v`.
+  A BAM whose header gives a chromosome another length than `-s`, or
+  shares no chromosome with it, gets a warning on stderr first (another
+  assembly's or naming's sizes); `bam2fw` refuses it.
 - BAM, and BED/tsv that is uncompressed or BGZF, are read on the `-p`
   threads. A plain-gzip `.tsv.gz` is inflated in order on one core:
   recompress it with `bgzip` under the same name. SAM, `-mp` and URLs go

@@ -403,11 +403,12 @@ grouped with a conservation track costs float32 bytes per count before
 compression, and its reads decode the conservation values too. A file of
 cells read as pseudobulks wants every cell in one group, and a file read a
 few tracks at a time wants track order. The defaults, a tile of 16,384
-and groups of 8, suit count tracks, whose chunks are mostly zero; dense
-float tracks read in short windows, such as conservation, fold-change or
-p-value signal, want ``tile=1024`` and ``groups=1``, which
-:doc:`benchmarks` measures at seven times the speed of the defaults for a
-file half again as large. A ``write`` call covers whole groups.
+and groups of 8, suit count tracks, whose chunks are mostly zero, and
+read dense float tracks in short windows, such as conservation,
+fold-change or p-value signal, 1.6 to 3.2 times faster than their bigWigs
+on 1 to 32 threads; ``tile=1024`` and ``groups=1`` read them a third
+faster on one thread for a file a quarter larger, and slower from 8
+threads on (:doc:`benchmarks`). A ``write`` call covers whole groups.
 ``write_figwig`` writes one call's worth to a new file:
 
 .. code-block:: python
