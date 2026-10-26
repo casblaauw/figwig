@@ -83,5 +83,5 @@ say.
 | 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
 | `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |
 | threads not making a read faster; a first call that takes 30 s | `references/threads-and-memory.md` |
-| a figwig read slower than expected, or decoding more tracks than asked | `references/figwig-writing.md`: tile, groups and order |
+| a figwig read slower than expected, or decoding more tracks than asked | `references/threads-and-memory.md` for threads and batches, then `references/figwig-writing.md`: tile, groups and order |
 | "has been replaced or rewritten since this reader opened it" | `references/errors.md`: open the reader again |

@@ -60,6 +60,8 @@ Writing
 Claude Code skill
 -----------------
 
+	- The skill's layout advice for dense float tracks follows the benchmarks page since the runs decoder was rewritten: the defaults, not ``tile=1024, groups=1``; it names the BAM header check and the refusal of a sizes file sharing no chromosome where the commands are described, and its two ``FigWigWriter`` snippets define their inputs.
+
 	- The skill covers figwig files, in ``references/figwig-reading.md``, ``figwig-writing.md`` and ``converters.md``, and ``references/recipes.md`` walks through whole jobs: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip and reads as tracks. The router routes by task and by symptom to the operation to use, every error message is in ``references/errors.md``, and the machine-bound timings are gone in favour of the rules they supported and a snippet to measure with. Re-run ``figwig install-skill --force`` to pick up the new skill.
 
 

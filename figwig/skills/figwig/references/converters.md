@@ -32,8 +32,10 @@ figwig info k562.fw [-b]                                                        
 
 - Chromosomes come from the bigWigs, which must agree on lengths; `-s
   sizes` sets them instead, must agree with every bigWig on the
-  chromosomes they share (an hg19 bigWig with hg38 sizes is refused), warns
-  about chromosomes it drops, and a bigWig lacking one is 0 there. Use `-s`
+  chromosomes they share (an hg19 bigWig with hg38 sizes is refused), must
+  share at least one with every bigWig (`1` against `chr1` is refused rather
+  than written as zeros), warns about chromosomes it drops, and a bigWig
+  lacking one is 0 there. Use `-s`
   to give files that will be merged the same chromosome set.
 - `-t` tile, `--groups` tracks per group, `--dtype` one dtype for all,
   `-l` level (0 for raw chunks), `-z` zoom levels beside the tile sums
@@ -54,10 +56,11 @@ figwig info k562.fw [-b]                                                        
 
 ## fw2bw
 
-`<track name>.bw` per track in `-o`; names that collide get `.1.bw` etc.
-and the table says which is whose. Zeros and a float track's NaN are left
-out, as `BigWigWriter` leaves them out with `missing=0.0`; `--missing nan`
-leaves NaN out and writes the zeros, for a file made with `bw2fw --missing
+`<track name>.bw` per track in `-o`; a name another track already has
+gets the track's index (`atac.5.bw`) and the table says which is whose.
+Zeros and a float track's NaN are left out, as `BigWigWriter` leaves them
+out with `missing=0.0`; `--missing nan` leaves NaN out and writes the
+zeros, for a file made with `bw2fw --missing
 nan`. `-z N` writes N zoom levels (0 by default; a browser wants 10). There
 is no bedGraph export: `fw2bw` then `bigWigToBedGraph`, or `read_entries`.
 
@@ -69,7 +72,11 @@ file becomes its own pair of tracks `<name>.+` and `<name>.-` (one with
 the table's other columns are the tracks' attributes, plus `strand`. `-r`
 divides by each file's own depth. Counts are written as entries at level 1
 (`-l` otherwise); with `-c` (aligned-base coverage) as runs, each track its
-own group. Needs the `bam2bw` extra; Linux and macOS.
+own group. Each BAM's header is checked against `-s` first: a chromosome
+both name must have one length and the BAM must share a chromosome with
+the sizes, or the file is refused as another assembly's or naming's
+(`figwig bam2bw` warns and goes on, as bam2bw does). Needs the `bam2bw`
+extra; Linux and macOS.
 
 `--barcode-column 4` (the column, from 1; 4 in a Cell Ranger fragments
 file) writes a fragments file as one track per cell, named by its barcode,
@@ -89,9 +96,10 @@ group per file.
 
 - `reorder` reads every nonzero base and writes it in the order asked:
   `tracks`/`csr` or `positions`/`csc`. `-t` and `--groups` default to the
-  input's (16,384 and 8 from track order); `-l` to the input's within one
-  order, else 6 in position order and 0 in track order, so a reordering to
-  track order is raw and 3 to 4x larger unless `-l` is given. The output
+  input's (16,384 and 8 from track order); `-l` to the input's from
+  position order to position order, else 6 in position order and 0 in
+  track order, so a reordering to track order is raw and 3 to 4x larger
+  unless `-l` is given. The output
   may be the input itself.
 - `merge` copies chunks, no decoding, from files written with the same
   chromosomes, tile, level and order (`reorder` one first otherwise) and

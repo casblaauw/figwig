@@ -131,7 +131,7 @@ integer tracks read many at a time, where it is a fifth of the bigWigs'
 size and reads faster. Dense float tracks, such as conservation or fold
 change, gain less in size, and a 2 kb window of them decodes a whole tile
 of every track in its group; three phyloP and phastCons tracks over chr22
-still read 1.6 to 3.8 times faster than their bigWigs on 1 to 32 threads,
+still read 1.6 to 3.2 times faster than their bigWigs on 1 to 32 threads,
 and the [converters page](https://figwig.readthedocs.io/en/latest/converters.html)
 says when a smaller tile pays.
 

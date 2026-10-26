@@ -4,9 +4,9 @@
 and `read_bigwig(bigwigs, chroms, starts, width, ...)`, where `bigwigs` is
 one path or reader (result `(n, width)`) or a list, even of one (result
 `(n, len(bigwigs), width)`, channel `i` from `bigwigs[i]`). Always float32.
-`engine='auto'` inflates with ISA-L when the `isal` extra (python-isal 1.8)
-is installed and with zlib otherwise; `'zlib'` and `'isal'` choose one. The
-values are the same.
+`engine='auto'` inflates with ISA-L when the `isal` extra (python-isal 1.8,
+built on the ISA-L version the kernel knows, 2.31.1) is installed and with
+zlib otherwise; `'zlib'` and `'isal'` choose one. The values are the same.
 
 ```python
 import numpy
@@ -52,9 +52,10 @@ used: binned values are a reshape, `y.reshape(len(y), -1, 32).mean(axis=-1)`
 
 ## Chromosome names
 
-A writer leaves out chromosomes without data, so a window on one is
-`missing` throughout, with a warning naming the chromosomes and some of the
-file's own. The same warning is what `1` against `chr1` looks like: check
+Many writers leave out chromosomes without data (figwig's keeps every one
+of `chrom_sizes`), so a window on one is `missing` throughout, with a
+warning naming the chromosomes and some of the file's own. The same
+warning is what `1` against `chr1` looks like: check
 `set(chroms) - set(reader.chrom_sizes)` before reading, and map names in the
 call (`numpy.char.add("chr", chroms)`) rather than renaming your tables.
 `reader.chrom_sizes` is in the file's order, which is name order (`chr1`,

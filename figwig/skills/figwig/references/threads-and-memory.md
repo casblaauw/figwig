@@ -13,7 +13,8 @@ stable, and the last section measures the numbers where they matter.
 - figwig files: one thread per 64 chunks touched, up to `n_jobs`, with the
   pool kept between reads, and batches cut so that each thread gets at
   least two, however large the chunks. Gains end near 8 threads for sparse
-  reads and continue to 32 for dense float tracks. Sums
+  reads and continue to 32 for dense float tracks, which read at the
+  defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. Sums
   in position order take no copy of the output per thread; track order
   takes one per thread, which the 8 GiB guard counts.
 - In DataLoader workers pass `n_jobs=1`; `num_workers` is the parallelism.
@@ -24,9 +25,10 @@ stable, and the last section measures the numbers where they matter.
   `n_jobs` pool threads encode and compress it, and a summary thread folds
   it in, so the calling thread only takes the next batch; the writer runs
   `n_jobs + 2` threads. With libdeflate gains end near 8 threads; zlib keeps
-  gaining to 32. Zoom levels add a pass over the data, about 4x
+  gaining to 32. Zoom levels add a pass over the data, 2 to 4x
   the time of a write without them, and their memory grows with threads.
-- figwig files: whole tiles encode on the pool, partial tiles and
+- figwig files: whole tiles encode on the pool, in up to one task per
+  thread of at least 4 MB of tiles per call, partial tiles and
   intervals on the calling thread, so write windows for speed; the writer
   holds about 0.5 GB plus two to three times one call's values, so aim for
   calls of a few hundred MB. `bw2fw` stops gaining near `-p 8`; the

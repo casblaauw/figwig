@@ -7,9 +7,9 @@ machine allows (`references/threads-and-memory.md`).
 
 1. Make the tracks. From BAMs: `figwig bam2fw -s sizes -n data -m files.tsv -p 8 *.bam`
    (a stranded pair per file, `-ps 4 -ns -5` for ATAC-seq). From bigWigs:
-   `figwig bw2fw -o data.fw -m tracks.tsv -g hg38 -p 8 *.bw`, with `-t 1024
-   --groups 1` if they are dense float signal, and `--missing nan` if a
-   measured 0 matters (`references/converters.md`).
+   `figwig bw2fw -o data.fw -m tracks.tsv -g hg38 -p 8 *.bw`, at the
+   defaults for count and dense float tracks alike, with `--missing nan` if
+   a measured 0 matters (`references/converters.md`).
 2. Put the labels in the metadata table (assay, biosample, strand, fold,
    whatever the model selects by); `fw.select(assay="ATAC-seq")` returns
    the indices to pass as `tracks=`.
