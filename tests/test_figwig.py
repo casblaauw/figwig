@@ -374,9 +374,11 @@ def test_stats(fw, ref):
 			assert reader.stats['sum'][i] == 0 and reader.stats['min'][i] == 0
 			assert reader.stats['max'][i] == 0
 		else:
+			# The minimum and maximum are those of the nonzero bases, so a
+			# track of negative values has a negative maximum.
 			assert reader.stats['sum'][i] == values.sum()
-			assert reader.stats['min'][i] == min(0, values.min())
-			assert reader.stats['max'][i] == max(0, values.max())
+			assert reader.stats['min'][i] == values[values != 0].min()
+			assert reader.stats['max'][i] == values[values != 0].max()
 
 
 def test_pickle(fw):

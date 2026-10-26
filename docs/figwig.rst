@@ -587,9 +587,9 @@ in one call, with the genome coordinates kept in the file's attributes.
 Versions
 --------
 
-The header names the format's version, 1 in this first release, and a
-reader refuses a file of a later version with a message that says a newer
-figwig wrote it. The version changes only when the layout changes in a way
+The header names the format's version, 1, which :doc:`format` specifies
+and freezes, and a reader refuses a file of a later version with a
+message that says a newer figwig wrote it. The version changes only when the layout changes in a way
 an older reader would misread; an addition an older reader could ignore is
 marked instead in the header's ``optional`` bits, and one it must know in
 its ``required`` bits, which a reader refuses when it does not know them.
@@ -638,148 +638,19 @@ alone; the layout below is complete enough to read it without it.
 The layout
 ----------
 
-A figwig file is, in order: a 128-byte header; the chunks or blocks, as
-they were written; the chromosome table; a table of each track's sum,
-nonzero bases, minimum and maximum; the metadata, a JSON document with the
-writing figwig's version (``figwig``), the ``genome``, the file's
-``attributes``, its ``order`` and every track's record (``tracks``), in
-which any other key is kept through an append for whoever put it there;
-and the index. Every integer is little-endian, and every chunk starts on an 8-byte
-boundary of the file. The index finds every chunk by its offset, so a
-file appended to holds its old tables and index between its chunks, and
-bytes past the header's ``length`` are ignored. A reader checks each
-table and each chunk it decodes against the file's length and the format
-before asking for memory, so a truncated or corrupt file raises a
-``ValueError`` that says what it found.
-
-The header, 128 bytes:
-
-=================  ====  ==================================================
-field              type  meaning
-=================  ====  ==================================================
-magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
-version            u2    1; a reader refuses a later version
-flags              u2    bit 0 set for track order
-tile               u4    bases per tile, a power of two from 16 to 65,536
-codec              u2    0 for uncompressed chunks, 1 for zlib streams
-level              u2    the compression level the chunks were written at
-n_chroms           u4    chromosomes in the chromosome table
-n_tracks           u4    tracks
-n_groups           u4    groups, which is n_tracks in track order
-tables_crc         u4    CRC-32 of the bytes from ``chroms`` to the end of the index's directory
-chroms             u8    offset of the chromosome table
-tracks             u8    offset of the statistics table
-index              u8    offset of the index
-data               u8    offset of the first chunk, 128
-metadata           u8    offset of the metadata
-metadata_length    u8    bytes of the metadata
-zooms              u8    0; the zoom levels lie in the index, after each group's summary
-length             u8    bytes of the file
-required           u4    feature bits a reader must know; none defined, so a reader refuses any set bit
-optional           u4    feature bits a reader may ignore; bit 0 says each index record ends with a zoom section, and is set in every file this release writes
-header_crc         u4    CRC-32 of these 128 bytes with this field as 0
-padding            20    0
-=================  ====  ==================================================
-
-The chromosome table is, for each chromosome in the file's order, the
-length of its UTF-8 name as a u2, the name, and its length in bases as a
-u8, from 1 to 2**32 - 1. The statistics table is one 32-byte record per
-track: the sum (f8), the nonzero bases (u8), the minimum (f8) and the
-maximum (f8) of the values written, the minimum and maximum 0 for a track
-with no nonzero base. The metadata is UTF-8 JSON with the keys ``genome``
-(a string or null), ``attributes`` (an object), ``order`` (``positions``
-or ``tracks``) and ``tracks``, a list with one object per track in order,
-each with its ``name``, its ``dtype`` (one of ``uint8``, ``uint16``,
-``uint32``, ``int8``, ``int16``, ``int32``, ``float32``, ``float64``), its
-``group`` (an integer from 0) and its attributes; a reader takes the
-records' order as the track order and, within a group, as the order of the
-group's tracks in its chunks.
-
-The index starts with a directory of ``n_groups`` u8 offsets, one per
-group's record. In position order a record is ``n_runs`` (u4) and the
-CRC-32 (u4) of the record's bytes up to the summary, then that
-many 32-byte runs of ``first`` tile, ``last`` tile, ``offset`` in the file
-and ``bytes`` (all u8), then ``n_live`` (u4), ``n_bytes`` (u4) and a zlib
-stream of ``n_bytes`` that inflates to ``17 * n_live`` bytes: the live
-tiles' numbers (u4 each, ascending), then their kind bytes (u1 each), then
-their compressed sizes (u4 each), then their uncompressed sizes (u4 each),
-then the CRC-32 of each chunk's bytes as they lie in the file (u4 each).
-Tiles are numbered over the genome in order, each chromosome's tiles after
-the one before's, and a tile not listed holds only zeros. A run holds the
-chunks of tiles ``first`` to ``last``, back to back from ``offset`` for
-``bytes`` bytes, so a chunk's offset is its run's plus the compressed
-sizes of the run's earlier tiles. A group written chromosome by chromosome
-has one run; groups written in turn have a run per switch. In track order
-a record is ``n_blocks`` (u4) and the CRC-32 (u4) of the blocks' bytes,
-then that many 40-byte blocks of
-``chrom`` (u4, an index into the chromosome table), ``first`` and
-``last`` position (u4), ``n`` entries (u4), ``offset`` (u8), compressed
-``size`` and uncompressed ``raw`` size (u4), ``kind`` (u4, the kind byte)
-and the block's CRC-32 (u4). Either record ends with the group's summary:
-``n_sum`` (u4), ``n_sum_bytes`` (u4) and a zlib stream of that many bytes
-that inflates to ``n_sum * (4 + 4 * tracks)`` bytes, the numbers of the
-tiles with a nonzero sum (u4 each, ascending) then each of those tiles'
-sums per track of the group (f4 each, tile by tile); a group whose
-summary was not kept has ``n_sum_bytes`` of 0. When the header's
-``optional`` bit 0 is set, the summary is followed by the group's zoom
-section: ``n_zooms`` (u4, at most 12), then for level ``k`` from 1 its
-``factor`` (u4, ``4 ** k``), ``n`` bins (u4), ``n_bytes`` (u4), the CRC-32
-(u4) of the stream that follows, and a zlib stream of ``n_bytes`` that
-inflates to ``n * (4 + 8 * tracks)`` bytes: the numbers of the bins with a
-nonzero sum (u4 each, ascending) then each of those bins' sums per track
-(f8 each, bin by bin). Bins are numbered over the genome as tiles are,
-each chromosome of ``n`` tiles taking ``ceil(n / factor)`` bins, so a bin
-never crosses a chromosome. A file written without zoom levels has
-``n_zooms`` of 0, and a group whose summary was not kept keeps no levels.
-
-A chunk's kind byte holds its kind in bits 0-2: 0 for a tile that holds
-only zeros and has no chunk, 1 dense, 2 sparse, 3 matrix, 4 runs; its
-element code in bits 3-6: 0 uint8, 1 uint16, 2 uint32, 3 int8, 4 int16, 5
-int32, 6 float32, 7 "one", 8 float64; and in bit 7 whether the chunk is
-stored as it is in a compressed file, because deflating it would have made
-it larger, in which case its compressed and uncompressed sizes are equal.
-A compressed chunk is one zlib stream. A dense chunk holds every value of
-the tile, track after track in the group's order, in the element type. A
-sparse chunk holds the number of nonzero bases in all (u4), then for each
-track the bytes its offsets take (u4), then each track's nonzero offsets
-within the tile, the first as it is and the rest as differences from the
-one before, each as a LEB128 varint (seven bits per byte, low bits first,
-the high bit set on every byte but the last; at most three bytes), then
-padding to a multiple of 4 bytes, then each track's nonzero values in the
-element type; a track's number of bases is the number of its bytes whose
-high bit is clear. A runs chunk has the same layout, but its offsets are
-the bases where a track's value changes, and its values the value from
-each change up to the next, or to the end of the tile, with 0 before a
-track's first change. A matrix chunk holds the number of tracks present
-(u4), their positions in the group (u4 each, ascending), a u4 pointer per
-present track into the entries plus one at the end, the entries' offsets
-within the tile (u2 each, ascending within a track), padding to 4 bytes,
-and the values. The "one" element type stores no values, every nonzero
-value being 1; a dense or runs chunk never uses it. A chunk's bytes are
-padded to a multiple of 8. A track-order block holds its entries'
-positions on the chromosome (u4 each, ascending), padding to 8 bytes, and
-their values in the block's element type, padded to 8 bytes.
-
-A reader that follows this can read a figwig file with numpy and zlib
-alone, as one of the tests of the format does.
-
-Limits
-------
-
-=================================  ===================================================================
-what                               limit
-=================================  ===================================================================
-chromosome length                  2**32 - 1 bases
-chromosome name                    65,535 bytes of UTF-8
-tiles over the genome              2**26; the writer refuses a tile too small for the genome
-tile sums                          kept while tracks x tiles x 4 bytes is at most 256 MB
-tracks per group                   2**29 / tile: 32,768 at the default tile, 131,072 at 4,096
-nonzero bases per track-order      65,536 per block, any number of blocks
-block
-dense read                         8 GiB unless ``out`` is given
-scratch tile for sums              256 MB per thread, channels times tile times 8 bytes; a read of more channels bins each window from its chunks without one
-values                             integers to 2**53 exactly; a 64-bit integer beyond it is refused; float32 or float64 otherwise; NaN allowed, infinity refused
-=================================  ===================================================================
+The format is specified byte by byte on :doc:`format`, which is the
+page for writing another reader or writer: the 128-byte header, the
+chromosome, statistics and metadata tables, the index of runs, live tiles
+and blocks with its summaries and zoom levels, the five chunk kinds and
+nine element types, what a reader must check, and the limits. The
+specification is tested against the files this package writes by a reader
+written from it alone, and comes with a Kaitai Struct definition for other
+languages. In short: a file is a 128-byte header, the chunks or blocks as
+they were written, the chromosome table, a table of each track's sum,
+nonzero bases, minimum and maximum, the metadata as a JSON document, and
+the index; every integer is little-endian, and every structure is found by
+an offset, so a file appended to in place keeps its old tables and index
+as unused bytes between its chunks.
 
 The position-order index on disk holds the tiles with values, so a group
 with little data costs a few bytes; in memory a group's index is 17 bytes

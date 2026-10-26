@@ -285,8 +285,9 @@ def _pick_kind(n_tracks, n_present, total, delta_bytes, w, width, n_points,
 def _fold_stats(stats, nnz, mins, maxs, sums, flags, nans):
 	"""Add a tile's per-track statistics into `stats`, (tracks, 5): the sum
 	with Neumaier's compensation, kept in stats[g, 5] when there is a sixth
-	column, the nonzero bases less the NaN ones (`nans`), the minimum, the
-	maximum and the flags."""
+	column, the nonzero bases less the NaN ones (`nans`), the minimum and
+	the maximum over the nonzero bases (infinities for a track without
+	one, which move nothing) and the flags."""
 
 	compensated = stats.shape[1] > 5
 	for g in range(stats.shape[0]):
@@ -390,8 +391,8 @@ def _collect(row, width, cls, offs, vals, d, g, nnz, mins, maxs, sums, flags,
 	to vals[d:], and the track's statistics and offset bytes are set.
 	Returns the entries found."""
 
-	lo = 0.0
-	hi = 0.0
+	lo = numpy.inf
+	hi = -numpy.inf
 	s = 0.0
 	frac = False
 	nan_count = 0
@@ -435,11 +436,11 @@ def _collect(row, width, cls, offs, vals, d, g, nnz, mins, maxs, sums, flags,
 def _survey(row, width, cls, g, nnz, mins, maxs, sums, flags, nans):
 	"""One track's statistics from its row, without a branch per base, for
 	a row with many nonzero bases, of the values as the track keeps them.
-	Zeros do not move a minimum or maximum that starts at zero, nor a
-	sum."""
+	The minimum and maximum are those of the nonzero bases, and stay at
+	infinity and minus infinity when there is none."""
 
-	lo = 0.0
-	hi = 0.0
+	lo = numpy.inf
+	hi = -numpy.inf
 	s = 0.0
 	frac = False
 	over = False
@@ -453,8 +454,8 @@ def _survey(row, width, cls, g, nnz, mins, maxs, sums, flags, nans):
 		s += 0.0 if is_nan else v
 		nan_count += is_nan
 		count += v != 0.0
-		lo = v if v < lo else lo
-		hi = v if v > hi else hi
+		lo = v if (v != 0.0 and v < lo) else lo
+		hi = v if (v != 0.0 and v > hi) else hi
 		frac |= v != numpy.floor(v)
 	nnz[g] = count
 	nans[g] = nan_count
@@ -745,8 +746,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 		if nz == 0:
 			nnz[g] = 0
 			nans[g] = 0
-			mins[g] = 0.0
-			maxs[g] = 0.0
+			mins[g] = numpy.inf
+			maxs[g] = -numpy.inf
 			sums[g] = 0.0
 			flags[g] = 0
 			dbytes[g] = 0
@@ -885,8 +886,8 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	n_tiles = tiles.shape[0]
 	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
 	nans = numpy.zeros(n_tracks, dtype=numpy.int64)
-	mins = numpy.zeros(n_tracks, dtype=numpy.float64)
-	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
+	mins = numpy.full(n_tracks, numpy.inf)
+	maxs = numpy.full(n_tracks, -numpy.inf)
 	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
 	flags = numpy.zeros(n_tracks, dtype=numpy.int64)
 	dbytes = numpy.zeros(n_tracks, dtype=numpy.int64)
@@ -952,8 +953,8 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 	n_tiles = items.shape[0]
 	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
 	nans = numpy.zeros(n_tracks, dtype=numpy.int64)
-	mins = numpy.zeros(n_tracks, dtype=numpy.float64)
-	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
+	mins = numpy.full(n_tracks, numpy.inf)
+	maxs = numpy.full(n_tracks, -numpy.inf)
 	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
 	flags = numpy.zeros(n_tracks, dtype=numpy.int64)
 	dbytes = numpy.zeros(n_tracks, dtype=numpy.int64)
@@ -993,19 +994,16 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	Only the tracks a tile touches are visited per tile: their statistics
 	are reset after the tile and folded into `stats`, where a group of
 	thousands of tracks, as cells are, would otherwise pay for every track
-	on every tile. A track a folded tile does not touch has the tile's
-	zeros folded in once, at the end, as its minimum and maximum of 0.
+	on every tile.
 	"""
 
 	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
 	nans = numpy.zeros(n_tracks, dtype=numpy.int64)
-	mins = numpy.zeros(n_tracks, dtype=numpy.float64)
-	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
+	mins = numpy.full(n_tracks, numpy.inf)
+	maxs = numpy.full(n_tracks, -numpy.inf)
 	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
 	flags = numpy.zeros(n_tracks, dtype=numpy.int64)
 	touched = numpy.empty(n_tracks, dtype=numpy.int64)
-	folded = numpy.zeros(n_tracks, dtype=numpy.int64)
-	n_folded = 0
 	most = 0
 	for t in range(tiles.shape[0]):
 		most = max(most, first[t + 1] - first[t])
@@ -1019,7 +1017,6 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		n = e1 - e0
 		need = max(4 + 4 * n_tracks + 3 * n + 8 * n + 16, 24 + 18 * n + 16)
 		if position + need > out.shape[0]:
-			_fold_absent(stats, folded, n_folded)
 			return t
 
 		# The entries of each track, in order, with their statistics and
@@ -1073,8 +1070,8 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 				g = touched[k]
 				nnz[g] = 0
 				nans[g] = 0
-				mins[g] = 0.0
-				maxs[g] = 0.0
+				mins[g] = numpy.inf
+				maxs[g] = -numpy.inf
 				sums[g] = 0.0
 				flags[g] = 0
 			continue
@@ -1093,20 +1090,17 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			n_touched, n_present, total, nnz, offs, vals)
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
-		n_folded += 1
 		for k in range(n_touched):
 			g = touched[k]
 			_fold_track(stats, g, nnz[g], mins[g], maxs[g], sums[g], flags[g],
 				nans[g])
-			folded[g] += 1
 			nnz[g] = 0
 			nans[g] = 0
-			mins[g] = 0.0
-			maxs[g] = 0.0
+			mins[g] = numpy.inf
+			maxs[g] = -numpy.inf
 			sums[g] = 0.0
 			flags[g] = 0
 
-	_fold_absent(stats, folded, n_folded)
 	return tiles.shape[0]
 
 
@@ -1131,20 +1125,6 @@ def _fold_track(stats, g, nnz, mn, mx, sm, fl, nan):
 	if mx > stats[g, 3]:
 		stats[g, 3] = mx
 	stats[g, 4] = numpy.float64(numpy.int64(stats[g, 4]) | fl)
-
-
-@numba.njit(nogil=True, cache=True)
-def _fold_absent(stats, folded, n_folded):
-	"""Fold the zeros of the tiles a track was absent from: a minimum and
-	maximum of 0, which `_fold_stats` gives every untouched track on every
-	tile."""
-
-	for g in range(stats.shape[0]):
-		if folded[g] < n_folded:
-			if 0.0 < stats[g, 2]:
-				stats[g, 2] = 0.0
-			if 0.0 > stats[g, 3]:
-				stats[g, 3] = 0.0
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1246,8 +1226,8 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 	for t in range(first.shape[0] - 1):
 		e0, e1 = first[t], first[t + 1]
 		n = e1 - e0
-		lo = 0.0
-		hi = 0.0
+		lo = numpy.inf
+		hi = -numpy.inf
 		s = 0.0
 		frac = False
 		over = False

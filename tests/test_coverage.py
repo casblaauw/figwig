@@ -452,22 +452,23 @@ def group_record(data, header, g=0, n_groups=None):
 		).copy() for start, stop, dtype in ((0, 4, '<u4'), (4, 5, 'u1'),
 		(5, 9, '<u4'), (9, 13, '<u4'), (13, 17, '<u4'))]
 	at += 8 + n_bytes
-	n_sum, n_sum_bytes = struct.unpack_from('<II', data, at)
-	return offset, runs, fields, (n_sum, bytes(data[at + 8:at + 8 +
-		n_sum_bytes]), bytes(data[at + 8 + n_sum_bytes:]))
+	n_sum, n_sum_bytes, _ = struct.unpack_from('<III', data, at)
+	return offset, runs, fields, (n_sum, bytes(data[at + 12:at + 12 +
+		n_sum_bytes]), bytes(data[at + 12 + n_sum_bytes:]))
 
 
 def rebuild(data, header, offset, runs, fields, summary):
 	"""The file with its last group's record written again from these
 	pieces, checksum included."""
 
-	n_sum, stream, tail = summary
+	n_sum, stream, tail = summary[:3]
+	summary_crc = summary[3] if len(summary) > 3 else zlib.crc32(stream)
 	live = b''.join(f.tobytes() for f in fields)
 	packed = zlib.compress(live)
 	body = runs.tobytes() + struct.pack('<II', len(fields[0]), len(packed))
 	crc = zlib.crc32(packed, zlib.crc32(body))
 	record = struct.pack('<II', len(runs), crc) + body + packed + struct.pack(
-		'<II', n_sum, len(stream)) + stream + tail
+		'<III', n_sum, len(stream), summary_crc) + stream + tail
 	copy = bytearray(data[:offset]) + record
 	put(copy, 'length', len(copy))
 	seal(copy)
@@ -518,10 +519,12 @@ def test_forged_summary_is_refused(tmp_path, small):
 	tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').copy()
 	sums = raw[4 * n_sum:]
 
-	def forged(tiles_, n=None, packed=None):
+	def forged(tiles_, n=None, packed=None, crc=None):
 		body = zlib.compress(tiles_.astype('<u4').tobytes() + sums)
-		return rebuild(data, header, offset, runs, fields, (len(tiles_) if n is
-			None else n, body if packed is None else packed, tail))
+		summary = [len(tiles_) if n is None else n, body if packed is None else
+			packed, tail]
+		return rebuild(data, header, offset, runs, fields, summary if crc is
+			None else summary + [crc])
 
 	def call(r):
 		return r.tile_sums()
@@ -538,6 +541,9 @@ def test_forged_summary_is_refused(tmp_path, small):
 		"ends inside it", call)
 	refuses(save(tmp_path, 'short.fw', forged(tiles, packed=b'x' * 3)),
 		"ends inside it|cannot be read", call)
+	# The stream's CRC-32 is checked before it is inflated.
+	refuses(save(tmp_path, 'crc.fw', forged(tiles, crc=1)),
+		"summary does not match its checksum", call)
 	save(tmp_path, 'ok.fw', forged(tiles))
 	assert FigWigReader(str(tmp_path / 'ok.fw')).tile_sums().shape[0] == n_tracks
 
@@ -1734,7 +1740,7 @@ def test_forged_zoom_level_is_refused(tmp_path, ref):
 		tile=TILE, zooms=1)
 	reader = FigWigReader(path)
 	reader._group_index(0)
-	at, n_sum, n_bytes = reader._summary_at[0]
+	at, n_sum, n_bytes, _ = reader._summary_at[0]
 	with open(path, 'rb') as handle:
 		original = handle.read()
 	forged = str(tmp_path / 'forged.fw')

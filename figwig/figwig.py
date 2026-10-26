@@ -1983,10 +1983,11 @@ class FigWigWriter:
 
 	def _summary_record(self, g):
 		"""The summary of group g for the index: the tiles with a nonzero
-		sum and each track's sum over them, deflated, or an empty record."""
+		sum and each track's sum over them, deflated, with the stream's
+		CRC-32, or an empty record."""
 
 		if not self._summaries:
-			return struct.pack('<II', 0, 0) + struct.pack('<I', 0)
+			return struct.pack('<III', 0, 0, 0) + struct.pack('<I', 0)
 		n_tracks = len(self._groups[g])
 		tiles = numpy.concatenate([t for t, _ in self._sums[g]] + [numpy.zeros(0,
 			dtype=numpy.int64)])
@@ -1994,8 +1995,8 @@ class FigWigWriter:
 			n_tracks), dtype=numpy.float32)]).astype(numpy.float64)
 		if len(tiles) == 0:
 			stream = zlib.compress(b'', 6)
-			return struct.pack('<II', 0, len(stream)) + stream + \
-				self._zoom_section(tiles, sums)
+			return struct.pack('<III', 0, len(stream), zlib.crc32(stream)) + \
+				stream + self._zoom_section(tiles, sums)
 		order = numpy.argsort(tiles, kind='stable')
 		tiles, sums = tiles[order], sums[order]
 		first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
@@ -2004,8 +2005,8 @@ class FigWigWriter:
 		tiles = tiles[starts]
 		stream = zlib.compress(tiles.astype('<u4').tobytes() + sums.astype(
 			'<f4').tobytes(), 6)
-		return struct.pack('<II', len(tiles), len(stream)) + stream + \
-			self._zoom_section(tiles, sums)
+		return struct.pack('<III', len(tiles), len(stream), zlib.crc32(stream)) \
+			+ stream + self._zoom_section(tiles, sums)
 
 	def _zoom_section(self, tiles, sums):
 		"""The zoom levels of a group, from its tile sums (file tiles
@@ -2518,9 +2519,10 @@ class FigWigReader:
 
 	stats: numpy.ndarray, shape=(tracks,)
 		A structured array with each track's 'sum', 'nonzero' bases, 'min'
-		and 'max', over the bases that are not NaN: a NaN base is stored
-		and read back but is no part of the statistics, so a track whose
-		uncovered bases are NaN keeps those of its covered ones.
+		and 'max', over the bases that are not NaN, the minimum and maximum
+		over the nonzero ones (0 for a track without one): a NaN base is
+		stored and read back but is no part of the statistics, so a track
+		whose uncovered bases are NaN keeps those of its covered ones.
 	"""
 
 	def __init__(self, path: str | os.PathLike, verify: bool = False):
@@ -2933,28 +2935,28 @@ class FigWigReader:
 
 	def _summary_header(self, at, error):
 		"""Where a group's summary stream lies and what it holds: (offset,
-		n_sum, n_bytes), read from the record at `at`."""
+		n_sum, n_bytes, crc), read from the record at `at`."""
 
-		if at + 8 > self._file_size:
+		if at + 12 > self._file_size:
 			raise ValueError(error + ": the file ends inside it.")
 		fd = _open_read(self.path)
 		try:
-			raw = _pread(fd, 8, at)
+			raw = _pread(fd, 12, at)
 		finally:
 			os.close(fd)
-		if len(raw) != 8:
+		if len(raw) != 12:
 			raise ValueError(error + ": the file ends inside it.")
-		n_sum, n_bytes = struct.unpack('<II', raw)
-		if n_sum > self._n_tiles or n_bytes > self._file_size - at - 8:
+		n_sum, n_bytes, crc = struct.unpack('<III', raw)
+		if n_sum > self._n_tiles or n_bytes > self._file_size - at - 12:
 			raise ValueError(error + ": the file ends inside it.")
-		return at + 8, n_sum, n_bytes
+		return at + 12, n_sum, n_bytes, crc
 
 	def _tile_sums_of(self, g):
 		"""Group g's summary, as (file tiles, sums of shape (tiles, tracks)
 		float32), or None when the file keeps none for it."""
 
 		self._group_index(g)
-		at, n_sum, n_bytes = self._summary_at[g]
+		at, n_sum, n_bytes, crc = self._summary_at[g]
 		if n_bytes == 0:
 			return None
 		n_tracks = len(self._groups[g])
@@ -2966,6 +2968,9 @@ class FigWigReader:
 		error = "The index of {} cannot be read".format(self.path)
 		if len(stream) != n_bytes:
 			raise ValueError(error + ": the file ends inside it.")
+		if zlib.crc32(stream) != crc:
+			raise ValueError(error + ": its summary does not match its checksum; "
+				"the file is corrupt.")
 		raw = _inflate_exact(stream, n_sum * (4 + 4 * n_tracks), error)
 		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.int64)
 		if n_sum > 0 and (tiles.max() >= self._n_tiles or (tiles[1:] <= tiles[
@@ -2992,7 +2997,7 @@ class FigWigReader:
 		if self._zoom_levels[g] is not None:
 			return self._zoom_levels[g]
 		self._group_index(g)
-		at, n_sum, n_bytes = self._summary_at[g]
+		at, n_sum, n_bytes, _ = self._summary_at[g]
 		levels = []
 		if self._optional & _OPTIONAL_ZOOMS:
 			error = "The index of {} cannot be read".format(self.path)

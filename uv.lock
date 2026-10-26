@@ -548,6 +548,7 @@ dev = [
     { name = "build" },
     { name = "deflate" },
     { name = "isal" },
+    { name = "kaitaistruct" },
     { name = "pybigtools" },
     { name = "pybigwig", marker = "sys_platform != 'win32'" },
     { name = "pyfaidx" },
@@ -582,6 +583,7 @@ requires-dist = [
     { name = "isal", marker = "extra == 'bam2bw'", specifier = ">=1.0" },
     { name = "isal", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "isal", marker = "extra == 'isal'", specifier = ">=1.8" },
+    { name = "kaitaistruct", marker = "extra == 'dev'", specifier = ">=0.10" },
     { name = "numba", specifier = ">=0.58" },
     { name = "numpy", specifier = ">=1.23" },
     { name = "pybigtools", marker = "extra == 'dev'", specifier = ">=0.2.5,<0.3" },
@@ -756,6 +758,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
+]
+
+[[package]]
+name = "kaitaistruct"
+version = "0.11"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/b8/ca7319556912f68832daa4b81425314857ec08dfccd8dbc8c0f65c992108/kaitaistruct-0.11.tar.gz", hash = "sha256:053ee764288e78b8e53acf748e9733268acbd579b8d82a427b1805453625d74b", size = 11519, upload-time = "2025-09-08T15:46:25.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/4a/cf14bf3b1f5ffb13c69cf5f0ea78031247790558ee88984a8bdd22fae60d/kaitaistruct-0.11-py2.py3-none-any.whl", hash = "sha256:5c6ce79177b4e193a577ecd359e26516d1d6d000a0bffd6e1010f2a46a62a561", size = 11372, upload-time = "2025-09-08T15:46:23.635Z" },
 ]
 
 [[package]]

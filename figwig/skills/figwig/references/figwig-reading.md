@@ -5,7 +5,9 @@ record of attributes, read like a bigWig: many windows of one width in one
 call, from any subset of the tracks, into `(n, tracks, width)` in the
 tracks' own dtype (uint8 or uint16 for most count tracks). One
 `FigWigReader(path)`; `read_figwig(path_or_reader, ...)` takes the same
-arguments as `reader.read`.
+arguments as `reader.read`. The byte layout is specified on the docs'
+`format` page, with a Kaitai Struct definition, for reading from another
+language.
 
 ```python
 import numpy
