@@ -280,3 +280,23 @@ which makes pybigtools a natural fallback for the bigWigs figwig refuses.
 A bigBed raises the same ``ValueError``, and pybigtools' ``values()`` on
 a bigBed panics with an exception that is not an ``Exception``, so check
 the file's magic first where a path may be either.
+
+ISA-L decompression
+-------------------
+
+Data blocks are inflated by ISA-L, Intel's inflate, when the ``isal`` package
+is installed (``pip install figwig[isal]``; python-isal 1.8 or later, which
+the ``bam2bw`` extra installs too), and by zlib otherwise. ``engine='zlib'``
+or ``engine='isal'`` on ``read`` and ``read_bigwig`` chooses one. Both give
+the same values, and ISA-L reads 1.3 to 1.5 times faster on 1 to 8 threads
+(:doc:`benchmarks`).
+
+figwig calls ISA-L through two functions that python-isal's extension module
+exports, from numba and without the GIL, so no compiler is needed. The
+kernel writes the fields it uses of ISA-L's inflate state at the offsets
+they have in ISA-L 2.31.1, the version python-isal 1.8 bundles, on 64-bit
+platforms, and before the first read it inflates one known block that way
+and compares the bytes with zlib's. With another ISA-L version, or when
+that check fails, ``'auto'`` reads with zlib, and ``engine='isal'`` goes
+through python-isal's Python API, which holds the GIL and is slower than
+zlib on several threads.

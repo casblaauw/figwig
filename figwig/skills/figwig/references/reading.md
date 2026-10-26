@@ -1,9 +1,12 @@
 # Reading bigWigs
 
-`BigWigReader(path).read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)`
+`BigWigReader(path).read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False, *, engine='auto')`
 and `read_bigwig(bigwigs, chroms, starts, width, ...)`, where `bigwigs` is
 one path or reader (result `(n, width)`) or a list, even of one (result
 `(n, len(bigwigs), width)`, channel `i` from `bigwigs[i]`). Always float32.
+`engine='auto'` inflates with ISA-L when the `isal` extra (python-isal 1.8)
+is installed and with zlib otherwise; `'zlib'` and `'isal'` choose one. The
+values are the same.
 
 ```python
 import numpy

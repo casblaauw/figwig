@@ -235,17 +235,63 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 		source = data[starts[k]:starts[k] + sizes[k]]
 		status = uncompress(buffer[position:].ctypes, length.ctypes,
 			source.ctypes, sizes[k])
-		n = numpy.int64(length[0])
+		position = _place_block(blocks, k, status == 0, position,
+			numpy.int64(length[0]))
 
-		if status != 0:
-			blocks[k, 5] = 2
-		elif n == 0 or n % 4 != 0:
-			blocks[k, 5] = 0
-		else:
-			blocks[k, 0] = position // 4
-			blocks[k, 1] = (position + n) // 4
-			position += n
+	return position
 
+
+@numba.njit(nogil=True, cache=True)
+def _isal_inflate_blocks(init, inflate, state, block_state, crc_flag, data,
+	starts, sizes, buffer, blocks):
+	"""Inflate data blocks as `_inflate_blocks` does, with ISA-L's stateless
+	inflate, without the GIL.
+
+	`init` and `inflate` are ISA-L's isal_inflate_init() and
+	isal_inflate_stateless(), and `state` the bytes of one struct
+	inflate_state, at least 8-byte aligned, of which `block_state` and
+	`crc_flag` are the byte offsets of those fields. The struct starts with
+	next_out (a pointer), avail_out and total_out (32-bit), next_in (a
+	pointer), read_in (64-bit) and avail_in (32-bit). With crc_flag ISAL_ZLIB
+	(3), a block's zlib header and Adler-32 checksum are checked, as zlib
+	checks them; it is inflated when the call returns ISAL_DECOMP_OK (0) with
+	block_state ISAL_BLOCK_FINISH (5).
+	"""
+
+	ints = state.view(numpy.uint32)
+	pointers = state.view(numpy.uint64)
+	position = 0
+	for k in range(starts.shape[0]):
+		if blocks[k, 5] != 1:
+			continue
+
+		init(state.ctypes)
+		ints[crc_flag // 4] = 3
+		pointers[0] = buffer.ctypes.data + position
+		ints[2] = min(buffer.shape[0] - position, 2 ** 32 - 1)
+		pointers[2] = data.ctypes.data + starts[k]
+		ints[8] = sizes[k]
+		status = inflate(state.ctypes)
+		position = _place_block(blocks, k, status == 0 and
+			ints[block_state // 4] == 5, position, numpy.int64(ints[3]))
+
+	return position
+
+
+@numba.njit(nogil=True, cache=True)
+def _place_block(blocks, k, inflated, position, n):
+	"""Record block k's n inflated bytes at `position` of the buffer and
+	return the next position; or mark the block 2, for zlib.decompress, when
+	it was not inflated, or 0 when its bytes are not whole 32-bit words."""
+
+	if not inflated:
+		blocks[k, 5] = 2
+	elif n == 0 or n % 4 != 0:
+		blocks[k, 5] = 0
+	else:
+		blocks[k, 0] = position // 4
+		blocks[k, 1] = (position + n) // 4
+		position += n
 	return position
 
 

@@ -40,6 +40,8 @@ Reading
 
 	- The bigWig reader takes a file whose index leaves lie in natural chromosome order, chr1, chr2, ..., chr10, where the ids run chr1, chr10, chr2, by sorting the leaves; two bigWigs of the test collection were refused as unsorted where pyBigWig read them. ``BigWigReader.read`` and ``read_bigwig`` take ``keep_nan=``, with which an interval whose value is NaN reads as NaN rather than ``missing``.
 
+	- ``read`` and ``read_bigwig`` take ``engine``: ``'auto'``, the default, ``'zlib'`` or ``'isal'``. ``'auto'`` inflates data blocks with ISA-L where python-isal 1.8 or later is installed (the new ``isal`` extra; the ``bam2bw`` extra installs it too) and with zlib otherwise. ISA-L is called through two functions python-isal's extension exports, from the numba kernel without the GIL, as zlib's ``uncompress()`` is, so no compiler is needed; the kernel writes ISA-L's inflate state at the offsets of ISA-L 2.31.1, so it is used only with that version, on 64-bit platforms, and only once one known block inflated through it has given zlib's bytes. Every engine gives the same values, and the reading tests run under both. Reading the benchmarks' ATAC-seq and DNase-seq bigWigs takes 1.3 to 1.5 times less on 1 to 8 threads (1.0 to 1.4 on a first read in a fresh process). Thanks @YaoxiangLi!
+
 Writing
 -------
 
