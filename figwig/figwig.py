@@ -124,6 +124,15 @@ _BATCH_BYTES = 1 << 25
 _BATCH_CHUNKS = 256
 _MIN_BATCH_CHUNKS = 16
 _BATCHES_PER_THREAD = 8
+# Batches per thread a read of few large chunks is cut into, and the bytes
+# of dense tiles one task of a write call takes: enough tasks for every
+# thread, few enough that each one's planning, dispatch and bookkeeping,
+# 0.1 to 0.4 ms on the calling thread, stays small. A call of three dense
+# float tracks over 4 Mb was two tasks whatever the pool's size, and 32
+# threads wrote it no faster than 8; cut into tasks of a tile each it was
+# slower again, from the bookkeeping.
+_READ_BATCHES_PER_THREAD = 2
+_WRITE_TASK_BYTES = 1 << 22
 _ENTRIES_PER_BATCH = 1 << 20
 _CHUNKS_PER_THREAD = 64
 _SPLIT_PAIRS = 1024
@@ -1661,6 +1670,12 @@ class FigWigWriter:
 			int(ends[-1]) == int(self._lengths[tid])
 		bound = n_tracks * tile * 4 + 16
 		per_batch = max(1, _BATCH_BYTES // bound)
+		if self._pool is not None:
+			# Up to one task per thread from one call, each of at least
+			# _WRITE_TASK_BYTES of tiles, so that a call of a few hundred
+			# dense tiles keeps the pool busy.
+			tasks = min(self.n_jobs, max(2, len(tiles) * bound // _WRITE_TASK_BYTES))
+			per_batch = max(1, min(per_batch, -(-len(tiles) // tasks)))
 
 		# Whole tiles belong to the window that covers them, and the segments
 		# of whole and of partial tiles are encoded in tile order, so that
@@ -3586,7 +3601,7 @@ class FigWigReader:
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 				slots[self._slot_of[read_ids[mine]]] = channels[mine]
 				planned, cut = self._plan(g, slots, tiles, starts, width, None, mode,
-					accumulate, bins or 1, most, stops, nan_mode)
+					accumulate, bins or 1, most, stops, nan_mode, n_threads)
 				tasks.extend(planned)
 				cut_inside |= cut
 			if len(tasks) < n_threads:
@@ -3862,12 +3877,16 @@ class FigWigReader:
 		return dtype
 
 	def _plan(self, g, slots, tiles, starts, width, out, mode, accumulate, bins,
-		most, stops=None, nan_mode=0):
+		most, stops=None, nan_mode=0, n_threads=1):
 		"""The tasks that read group g's part of the windows: each a batch
 		of up to `most` chunks and the (window, tile) pairs that fall in
 		them, from the windows' tiles as `_window_tiles` gives them, as
 		(tasks, whether a batch was cut inside a window of a binned read,
-		which happens when a window is longer than a batch may grow)."""
+		which happens when a window is longer than a batch may grow). With
+		`n_threads`, a batch holds fewer bytes when the group's chunks are
+		few batches of _BATCH_BYTES, so that each thread gets several: a
+		chromosome of dense float tracks was 13 batches, and 32 threads
+		split them by their windows, each part inflating its chunks again."""
 
 		tile = self.tile
 		kinds, sizes, raws, offsets, crcs = self._group_index(g)
@@ -3878,6 +3897,13 @@ class FigWigReader:
 		chunk_kinds = kinds[unique]
 		live = chunk_kinds != 0
 		bounds = raws[unique].astype(numpy.int64) + 8
+		# A binned read keeps its batches, which are not cut inside a window
+		# while the window fits twice a batch: smaller batches would cut
+		# long windows and cost a copy of the output per thread.
+		cap = _BATCH_BYTES
+		if n_threads > 1 and bins == 1:
+			cap = max(int(bounds.max()), min(_BATCH_BYTES, int(bounds.sum()) // (
+				n_threads * _READ_BATCHES_PER_THREAD)))
 
 		# Batches of chunks, cut where a batch would hold too many bytes
 		# before compression or too many chunks; a binned read's batches
@@ -3891,13 +3917,13 @@ class FigWigReader:
 		while a < len(unique):
 			total_bytes, n_live, b = 0, 0, a
 			while b < len(unique) and (b == a or (total_bytes + bounds[b] <=
-					_BATCH_BYTES and n_live < most)):
+					cap and n_live < most)):
 				total_bytes += int(bounds[b])
 				n_live += int(live[b])
 				b += 1
 			if bins > 1:
 				while b < len(unique) and continues[b - 1]:
-					if total_bytes + bounds[b] > 2 * _BATCH_BYTES or n_live >= 2 * most:
+					if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
 						cut_inside = True
 						break
 					total_bytes += int(bounds[b])

@@ -47,9 +47,12 @@ is not installed. A read uses one thread per 64 chunks it touches, up to
 ``n_jobs``, since a read of a few dozen windows is done in under a
 millisecond and gains nothing from waking threads, and keeps its threads
 between reads; windows packed into a few tiles are cut over the threads by
-window rather than by chunk. On the six genome-wide count tracks of
+window rather than by chunk, and a read of few large chunks, as dense
+float tracks have, is cut into at least two batches per thread rather
+than batches of 32 MB. On the six genome-wide count tracks of
 :doc:`benchmarks`, 8,192 windows took 0.12 s on one thread and 0.05 s on
-8, and nothing more was gained past 8. Sums per label and per bin run a group's batches at a
+8, and nothing more was gained past 8; on three dense conservation tracks
+over chr22 they took 0.51, 0.070 and 0.034 s on 1, 8 and 32 threads. Sums per label and per bin run a group's batches at a
 time, each writing its own cells of the output, so they take no copy of
 the output per thread in position order; in track order they do, one per
 thread, which the 8 GiB guard counts.
@@ -58,9 +61,10 @@ Writing
 -------
 
 A ``FigWigWriter`` encodes whole tiles that a ``write`` call's windows cover
-on its pool and partial tiles on the calling thread, compresses on the
-pool, and holds about 0.5 GB plus two to three times the call's values, so
-a call of a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
+on its pool, in up to one task per thread of at least 4 MB of tiles per
+call, and partial tiles on the calling thread, compresses on the pool, and
+holds about 0.5 GB plus two to three times the call's values, so a call of
+a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
 each piece of a chromosome on one thread while the writer takes the last,
 and ``-p 8`` is where it stops gaining. A bigWig writer takes values in
 batches of about a million items on one thread, or 786,432 with threads,

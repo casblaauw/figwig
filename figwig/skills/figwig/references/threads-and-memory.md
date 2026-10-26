@@ -11,7 +11,9 @@ stable, and the last section measures the numbers where they matter.
   reading every window in one call gains up to 8 to 32 threads. A reused
   reader beats a path, which re-reads the index on every call.
 - figwig files: one thread per 64 chunks touched, up to `n_jobs`, with the
-  pool kept between reads. Gains end near 8 threads for dense reads. Sums
+  pool kept between reads, and batches cut so that each thread gets at
+  least two, however large the chunks. Gains end near 8 threads for sparse
+  reads and continue to 32 for dense float tracks. Sums
   in position order take no copy of the output per thread; track order
   takes one per thread, which the 8 GiB guard counts.
 - In DataLoader workers pass `n_jobs=1`; `num_workers` is the parallelism.
