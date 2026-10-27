@@ -144,6 +144,7 @@ says when a smaller tile pays.
 | bigWigs, pybigtools | 0.77 / 1.41 / 1.74 s | 5.9 / 11.0 / 13.6 s | 21 / 36 / 42 s |
 | bigWigs, pyBigWig | 2.23 / 2.56 / 2.75 s | 17.5 / 20.0 / 21.7 s | not run |
 | zarr, zstd | 1.95 / 2.25 / 2.61 s | 8.1 / 4.0 / 3.7 s | 46 / 15 / 12 s |
+| zarrs, zstd | 1.52 / 2.44 / 2.57 s | 8.2 / 23 / 25 s | 72 / 76 / 76 s |
 | HDF5, gzip 4 | 3.8 / 9.5 / 9.5 s | 31 / 78 / 75 s | 229 / 230 / 230 s |
 
 The 48 tracks are 148 MB as a figwig file, 1.3 GB as bigWigs figwig writes,

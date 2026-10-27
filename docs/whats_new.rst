@@ -6,6 +6,15 @@ Release History
 ===============
 
 
+Unreleased
+==========
+
+Documentation
+-------------
+
+	- The benchmarks page's count-track tables have a row for zarrs 0.2.3, the Rust codec pipeline for zarr-python, on the same arrays as the zarr row: it writes them 1.1 to 3.5 times faster than zarr-python and reads one window per call at zarr-python's one-thread speed, without gaining from the Python threads, with its chunk concurrency pinned to one chunk (its default read twice as slowly on these calls).
+
+
 Version 0.2.0
 =============
 

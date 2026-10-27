@@ -306,9 +306,14 @@ bigWig per track read by figwig, by
 pybigtools 0.2.5 and by pyBigWig 0.3.26 (those two on a thread pool of
 window chunks, one ``values()`` per window, since neither reads on
 threads itself), as a zarr 3 array (zstd, chunks of tracks x 65,536,
-zarr's own pool set to the thread count), as an HDF5 dataset (h5py, gzip
-4, the same chunks) and as a raw numpy memmap, and the figwig file in
-both orders. Every configuration ran in its own process under ``nice``,
+zarr's own pool set to the thread count), the same array through zarrs
+0.2.3, the Rust codec pipeline for zarr-python, with its chunk
+concurrency pinned to one chunk for the reads (each call touches one or
+two, and its default splits them across its pool at twice the time;
+measured on a later day at a load of 35 to 48 beside a second run of
+zarr-python, which read within 0.7 to 1.3 of the times in its row), as
+an HDF5 dataset (h5py, gzip 4, the same chunks) and as a raw numpy
+memmap, and the figwig file in both orders. Every configuration ran in its own process under ``nice``,
 files on tmpfs, OMP, MKL and OpenBLAS pinned to one thread, while other
 jobs kept the machine's load at 55 to 70. Reads are the median of up to
 five repeats after a warm-up that compiles the kernels and opens the
@@ -369,6 +374,11 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 8.1 / 4.0 / 3.7
      - 46 / 15 / 12
      - 55 / 18 / 15
+   * - zarrs, zstd
+     - 1.52 / 2.44 / 2.57
+     - 8.2 / 23 / 25
+     - 72 / 76 / 76
+     - 77 / 68 / 70
    * - HDF5, gzip 4
      - 3.8 / 9.5 / 9.5
      - 31 / 78 / 75
@@ -413,6 +423,11 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 9.2 / 4.6 / 5.3, 267 MB
      - 100 / 53 / 52, 2.8 GB
      - 185 / 129 / 140, 5.7 GB
+   * - zarrs, zstd
+     - 0.49 / 0.42 / 0.45, 33 MB
+     - 4.6 / 3.5 / 3.1, 267 MB
+     - 63 / 63 / 67, 2.8 GB
+     - 170 / 169 / 163, 5.7 GB
    * - HDF5, gzip 4
      - 6.2 / 6.4 / 6.5, 39 MB
      - 52 / 52 / 53, 309 MB
@@ -433,7 +448,12 @@ one thread and 2 to 6 times on 32, and is 8 times smaller than bigWigs
 figwig writes; both of figwig's readers gain from threads, where
 pyBigWig, pybigtools and HDF5 get slower with more of them (a lock or the
 GIL) and zarr stops at about 4 times, its reads being one Python call per
-window. Track order is the faster of the two for a few tracks, where its
+window. zarrs reads those calls at zarr-python's one-thread speed and
+gains nothing from the Python threads, with 8 or 32 of them calling into
+its pool of as many threads slower than one; reading 256 windows in one
+call through ``oindex``, the pattern it is built for, it matches
+zarr-python. It writes the arrays 1.1 to 3.5 times faster than
+zarr-python. Track order is the faster of the two for a few tracks, where its
 raw blocks need no inflating, and position order past about 48. The
 figwig writer is the fastest of the compressed formats on 8 threads and
 more at every track count (512 tracks in 38 s against zarr's 53 s, 1,024
