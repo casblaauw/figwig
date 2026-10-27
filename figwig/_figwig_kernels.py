@@ -4,6 +4,12 @@
 """The compiled half of figwig's own file format: encoding tiles of values
 into chunks, inflating chunks, and copying windows out of them.
 
+A constant passed from one kernel to another is written `bool(False)` or
+`int(0)`: numba types a bare constant as a literal and compiles the callee
+once per literal value on top of once per argument type, and those copies
+were a third of what a first call compiled (507 specializations against
+335 for the tests, 25 s of a first read).
+
 A figwig file in position order holds every track's values on a fixed grid
 of tiles of `tile` bases. The tiles of the tracks of one group, at one
 position, are one chunk, which is stored in one of five ways. A chunk whose
@@ -552,7 +558,7 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 	values_at = _pad4(at)
 	for p in range(at, values_at):
 		out[p] = 0
-	return _store_values(out, values_at, code, vals, 0, total)
+	return _store_values(out, values_at, code, vals, int(0), total)
 
 
 @numba.njit(nogil=True, cache=True)
@@ -779,8 +785,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	# A runs chunk can only win when its changes, at a byte each at least,
 	# would take fewer bytes than the smallest of the other kinds; only
 	# then are the bytes its varints really take counted.
-	_, least = _pick_kind(n_tracks, n_present, total, total, w, width, 0, 0,
-		True, allow_matrix, False, compressed)
+	_, least = _pick_kind(n_tracks, n_present, total, total, w, width, int(0),
+		int(0), bool(True), allow_matrix, bool(False), compressed)
 	counts = 4 * n_tracks
 	if compressed:
 		counts = counts // _DEFLATED_COUNTS + 4
@@ -798,7 +804,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	kind = _DENSE
 	if not collected:
 		kind, _ = _pick_kind(n_tracks, n_present, total, total, w, width,
-			n_points, run_bytes, True, allow_matrix, allow_runs, compressed)
+			n_points, run_bytes, bool(True), allow_matrix, allow_runs, compressed)
 		if kind != _DENSE:
 			d = 0
 			for g in range(n_tracks):
@@ -812,7 +818,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 		for g in range(n_tracks):
 			delta_bytes += dbytes[g]
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, width,
-			n_points, run_bytes, True, allow_matrix, allow_runs, compressed)
+			n_points, run_bytes, bool(True), allow_matrix, allow_runs, compressed)
 
 	if kind == _DENSE:
 		if code == _ONE:
@@ -928,8 +934,8 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 		if t == n_tiles - 1 and keep_last:
 			break
 
-		kinds[t], end = _encode_block(buffer, 0, width, classes, allow_matrix,
-			compressed, True, out, position, offs, vals, nnz, mins, maxs, sums,
+		kinds[t], end = _encode_block(buffer, int(0), width, classes, allow_matrix,
+			compressed, bool(True), out, position, offs, vals, nnz, mins, maxs, sums,
 			flags, dbytes, npts, rbytes, stats, tile_sums[t], nans)
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
@@ -969,7 +975,7 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 		if position + need > out.shape[0]:
 			return t
 		kinds[t], end = _encode_block(values[items[t]], columns[t], tile,
-			classes, allow_matrix, compressed, False, out, position, offs, vals,
+			classes, allow_matrix, compressed, bool(False), out, position, offs, vals,
 			nnz, mins, maxs, sums, flags, dbytes, npts, rbytes, stats,
 			tile_sums[t], nans)
 		position = _finish_chunk(out, end)
@@ -1084,7 +1090,7 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			maxs, sums, flags)
 		w = _WIDTHS[code]
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, tile,
-			0, 0, False, allow_matrix, False, compressed)
+			int(0), int(0), bool(False), allow_matrix, bool(False), compressed)
 		kinds[t] = kind | (code << _CODE_SHIFT)
 		end = _write_entries_of(out, position, kind, code, n_tracks, touched,
 			n_touched, n_present, total, nnz, offs, vals)
@@ -1200,7 +1206,7 @@ def _write_entries_of(out, position, kind, code, n_tracks, touched, n_touched,
 	values_at = _pad4(at)
 	for p in range(at, values_at):
 		out[p] = 0
-	return _store_values(out, values_at, code, vals, 0, total)
+	return _store_values(out, values_at, code, vals, int(0), total)
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1252,7 +1258,7 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 			-2147483648.0 or hi >= 4294967296.0) else 0) | (_FLAG_OVERFLOW if over
 			else 0)
 
-		code, _ = _chunk_code(1, classes, nnz, mins, maxs, sums, flags)
+		code, _ = _chunk_code(int(1), classes, nnz, mins, maxs, sums, flags)
 		kinds[t] = _DENSE | (code << _CODE_SHIFT)
 		view = out[position:position + 4 * n].view(numpy.uint32)
 		for e in range(n):
@@ -1984,47 +1990,48 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 	v0 = values_at
 	if code == _U8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + total], False, base, a, b, start, channels,
-			accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
-			out_values, bins, nan_mode)
+			slots, selected, data[v0:v0 + total], bool(False), base, a, b, start,
+			channels, accumulate, fill, row, k_out, out_rows, out_channels,
+			out_offsets, out_values, bins, nan_mode)
 	elif code == _U16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), False, base, a, b,
-			start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _U32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), False, base, a, b,
-			start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + total].view(numpy.int8), False, base, a, b,
-			start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + total].view(numpy.int8), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), False, base, a, b,
-			start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), False, base, a, b,
-			start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _F32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), False, base, a,
-			b, start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _F64:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, selected, data[v0:v0 + 8 * total].view(numpy.float64), False, base, a,
-			b, start, channels, accumulate, fill, row, k_out, out_rows,
+			slots, selected, data[v0:v0 + 8 * total].view(numpy.float64), bool(False),
+			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values, bins, nan_mode)
 	return _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
-		selected, data[v0:v0], True, base, a, b, start, channels, accumulate,
-		fill, row, k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode)
+		selected, data[v0:v0], bool(True), base, a, b, start, channels,
+		accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
+		out_values, bins, nan_mode)
 
 
 @numba.njit(nogil=True, cache=True)
@@ -2128,7 +2135,8 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 					scratch[targets[j], :] = 0
 			_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
 				slots, selected, base, base, base, base + tile, scratch, accumulate,
-				False, 0, 0, empty, empty, empty, empty_values, 1, 0)
+				bool(False), int(0), int(0), empty, empty, empty, empty_values,
+				int(1), int(0))
 			decoded = chunk
 
 		for r in range(q, q1):
@@ -2143,7 +2151,7 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			if not via_scratch:
 				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
 					slots, selected, base, start, a, b, out[row], accumulate or bins
-					> 1, False, row, 0, empty, empty, empty, empty_values, bins,
+					> 1, bool(False), row, int(0), empty, empty, empty, empty_values, bins,
 					nan_mode)
 				continue
 			for j in range(targets.shape[0]):
@@ -2187,8 +2195,8 @@ def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 		k_out = _window_of_chunk(tile, data, positions[chunk], _kind_of(kinds[
 			chunk]), _code_in(kinds[chunk]), n_tracks, slots, selected, base,
-			start, a, b, no_channels, False, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, 1, 0)
+			start, a, b, no_channels, bool(False), fill, row, k_out, out_rows,
+			out_channels, out_offsets, out_values, int(1), int(0))
 
 	return k_out
 
@@ -2233,39 +2241,39 @@ def _block_into(code, view, data, v0, n, start, end, row, slot, dst, adding,
 	code says."""
 
 	if code == _U8:
-		return _block_window(view, data[v0:v0 + n], False, n, start, end, row,
+		return _block_window(view, data[v0:v0 + n], bool(False), n, start, end, row,
 			slot, dst, adding, list_entries, fill, k_out, out_rows, out_channels,
 			out_offsets, out_values)
 	elif code == _U16:
-		return _block_window(view, data[v0:v0 + 2 * n].view(numpy.uint16), False,
-			n, start, end, row, slot, dst, adding, list_entries, fill, k_out,
-			out_rows, out_channels, out_offsets, out_values)
+		return _block_window(view, data[v0:v0 + 2 * n].view(numpy.uint16),
+			bool(False), n, start, end, row, slot, dst, adding, list_entries, fill,
+			k_out, out_rows, out_channels, out_offsets, out_values)
 	elif code == _U32:
-		return _block_window(view, data[v0:v0 + 4 * n].view(numpy.uint32), False,
-			n, start, end, row, slot, dst, adding, list_entries, fill, k_out,
-			out_rows, out_channels, out_offsets, out_values)
+		return _block_window(view, data[v0:v0 + 4 * n].view(numpy.uint32),
+			bool(False), n, start, end, row, slot, dst, adding, list_entries, fill,
+			k_out, out_rows, out_channels, out_offsets, out_values)
 	elif code == _I8:
-		return _block_window(view, data[v0:v0 + n].view(numpy.int8), False, n,
+		return _block_window(view, data[v0:v0 + n].view(numpy.int8), bool(False), n,
 			start, end, row, slot, dst, adding, list_entries, fill, k_out,
 			out_rows, out_channels, out_offsets, out_values)
 	elif code == _I16:
-		return _block_window(view, data[v0:v0 + 2 * n].view(numpy.int16), False,
+		return _block_window(view, data[v0:v0 + 2 * n].view(numpy.int16), bool(False),
 			n, start, end, row, slot, dst, adding, list_entries, fill, k_out,
 			out_rows, out_channels, out_offsets, out_values)
 	elif code == _I32:
-		return _block_window(view, data[v0:v0 + 4 * n].view(numpy.int32), False,
+		return _block_window(view, data[v0:v0 + 4 * n].view(numpy.int32), bool(False),
 			n, start, end, row, slot, dst, adding, list_entries, fill, k_out,
 			out_rows, out_channels, out_offsets, out_values)
 	elif code == _F32:
 		return _block_window(view, data[v0:v0 + 4 * n].view(numpy.float32),
-			False, n, start, end, row, slot, dst, adding, list_entries, fill,
+			bool(False), n, start, end, row, slot, dst, adding, list_entries, fill,
 			k_out, out_rows, out_channels, out_offsets, out_values)
 	elif code == _F64:
 		return _block_window(view, data[v0:v0 + 8 * n].view(numpy.float64),
-			False, n, start, end, row, slot, dst, adding, list_entries, fill,
+			bool(False), n, start, end, row, slot, dst, adding, list_entries, fill,
 			k_out, out_rows, out_channels, out_offsets, out_values)
-	return _block_window(view, data[v0:v0], True, n, start, end, row, slot, dst,
-		adding, list_entries, fill, k_out, out_rows, out_channels, out_offsets,
+	return _block_window(view, data[v0:v0], bool(True), n, start, end, row, slot,
+		dst, adding, list_entries, fill, k_out, out_rows, out_channels, out_offsets,
 		out_values)
 
 
@@ -2303,17 +2311,17 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 		v0 = _pad8(position + 4 * n)
 		if list_entries:
 			k_out = _block_into(code, view, data, v0, n, start, end, row, slot,
-				out[0, 0], False, True, fill, k_out, out_rows, out_channels,
+				out[0, 0], bool(False), bool(True), fill, k_out, out_rows, out_channels,
 				out_offsets, out_values)
 		elif bins > 1:
 			scratch[:] = 0
 			_block_into(code, view, data, v0, n, start, end, row, slot, scratch,
-				True, False, fill, k_out, out_rows, out_channels, out_offsets,
+				bool(True), bool(False), fill, k_out, out_rows, out_channels, out_offsets,
 				out_values)
-			_bin_into(out[row, slot], scratch, 0, 0, width, bins, nan_mode)
+			_bin_into(out[row, slot], scratch, int(0), int(0), width, bins, nan_mode)
 		else:
 			_block_into(code, view, data, v0, n, start, end, row, slot, out[row,
-				slot], accumulate, False, fill, k_out, out_rows, out_channels,
+				slot], accumulate, bool(False), fill, k_out, out_rows, out_channels,
 				out_offsets, out_values)
 
 	return k_out
