@@ -4,8 +4,14 @@
 
 [[docs](https://figwig.readthedocs.io/en/latest/index.html)][[release notes](https://figwig.readthedocs.io/en/latest/whats_new.html)]
 
-A fast, multithreaded reader and writer of bigWig files, into and out of
-numpy. Built on work from Nezar Abdennur and Jack Huey.
+A fast, multithreaded reader and writer of bigWig and figwig files, into and out of
+numpy. Also contains a formal specification of the figwig file format, which holds
+any number of per-base tracks over one genome with a JSON record of attributes for
+each, and reads windows from any subset of them in one call, into 
+`(windows, tracks, width)`. `figwig bw2fw` `fw2bw`, and `bam2fw` convert bigWigs
+and reads to and from a figwig file. 
+
+Built on work from Nezar Abdennur and Jack Huey.
 
 Loading training data for a genomics model means reading the signal under tens
 or hundreds of thousands of windows: 1,000 bp around every peak and background
@@ -21,12 +27,6 @@ Its command, `figwig bam2bw`, turns SAM/BAM files of reads, or BED/tsv files
 of fragments, into bigWigs of per-base counts. It is
 [bam2bw](https://github.com/jmschrei/bam2bw) with the same arguments, outputs
 and messages, with faster readers.
-
-figwig also defines its own file format, the figwig file, which holds any
-number of per-base tracks over one genome with a JSON record of attributes
-for each, and reads windows from any subset of them in one call, as
-integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
-`bam2fw` convert bigWigs and reads to and from it.
 
 | | figwig | fastest other tool |
 |---|---|---|
