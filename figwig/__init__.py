@@ -1,7 +1,7 @@
 # __init__.py
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 from .bigwig import BigWigReader
 from .bigwig import read_bigwig
