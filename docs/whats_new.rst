@@ -12,7 +12,7 @@ Unreleased
 figwig files
 ------------
 
-	- ``read(..., bins=)`` adds a runs chunk's values once per bin a run covers, as the value times its bases there, rather than base by base through a call per run, and so reads faster than the same windows per base: 19 count tracks of mouse ATAC, one 196,608 bp window per call in 128 bp bins, read in 3.3 ms against 14.9 ms, and 9.2 ms per base. The values are the same.
+	- Speed up binned reading in ``read(..., bins=)``: add a runs chunk's values once per bin rather than base by base.
 
 Documentation
 -------------
